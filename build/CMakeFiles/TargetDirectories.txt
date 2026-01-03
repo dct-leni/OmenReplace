@@ -1,0 +1,3 @@
+C:/Users/Leni/OmenReplace/build/CMakeFiles/OmenReplace.dir
+C:/Users/Leni/OmenReplace/build/CMakeFiles/edit_cache.dir
+C:/Users/Leni/OmenReplace/build/CMakeFiles/rebuild_cache.dir

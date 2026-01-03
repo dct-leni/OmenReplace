@@ -1,0 +1,11 @@
+external_source/
+
+.cache/
+.vscode/
+.agents/
+
+build/bin/
+build_*.txt
+build/*.log
+build/.cmake/
+build/CMakeFiles/OmenReplace.dir/
