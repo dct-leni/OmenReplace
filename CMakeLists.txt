@@ -39,7 +39,7 @@ target_include_directories(OmenReplace PRIVATE
 
 # --- Linking ---
 target_link_libraries(OmenReplace PRIVATE
-    d3d11 dxgi d3dcompiler wbemuuid dwmapi imm32 ole32 oleaut32 powrprof pdh
+    d3d11 dxgi d3dcompiler wbemuuid dwmapi imm32 ole32 oleaut32 powrprof pdh psapi
 )
 
 # --- Custom Commands ---

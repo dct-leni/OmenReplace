@@ -912,6 +912,11 @@ void Overlay::Render(OmenHal &hal) {
         if (ImGui::Checkbox("HUD Overlay", &m_showOverlayHUD))
           SyncConfig();
 
+        ImGui::Dummy(ImVec2(0, 4));
+        if (ImGui::Button("MEM OPTIMIZE", ImVec2(-1, 26))) {
+          hal.OptimizeMemory();
+        }
+
         ImGui::Dummy(ImVec2(0, 6));
         ImGui::TextColored(kMuted, "GPU Overclocking");
         ImGui::SameLine();

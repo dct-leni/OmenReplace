@@ -70,6 +70,7 @@ public:
   std::string GetGpuModeStr();
   int GetGpuModeInt();
   void RequestGpuMode(int mode);
+  void OptimizeMemory();
 
 private:
   OmenHal();

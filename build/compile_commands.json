@@ -13,6 +13,12 @@
 },
 {
   "directory": "C:/Users/Leni/OmenReplace/build",
+  "command": "C:\\ProgramData\\mingw64\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles/OmenReplace.dir/includes_CXX.rsp  -Os -ffunction-sections -fdata-sections -g -std=gnu++20 -o CMakeFiles\\OmenReplace.dir\\src\\hal\\MemoryService.cpp.obj -c C:\\Users\\Leni\\OmenReplace\\src\\hal\\MemoryService.cpp",
+  "file": "C:/Users/Leni/OmenReplace/src/hal/MemoryService.cpp",
+  "output": "CMakeFiles/OmenReplace.dir/src/hal/MemoryService.cpp.obj"
+},
+{
+  "directory": "C:/Users/Leni/OmenReplace/build",
   "command": "C:\\ProgramData\\mingw64\\mingw64\\bin\\g++.exe -DUNICODE -D_UNICODE @CMakeFiles/OmenReplace.dir/includes_CXX.rsp  -Os -ffunction-sections -fdata-sections -g -std=gnu++20 -o CMakeFiles\\OmenReplace.dir\\src\\hal\\OmenEc.cpp.obj -c C:\\Users\\Leni\\OmenReplace\\src\\hal\\OmenEc.cpp",
   "file": "C:/Users/Leni/OmenReplace/src/hal/OmenEc.cpp",
   "output": "CMakeFiles/OmenReplace.dir/src/hal/OmenEc.cpp.obj"

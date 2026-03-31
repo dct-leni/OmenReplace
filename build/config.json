@@ -1,14 +1,14 @@
 {
-  "fan_mode": 3,
-  "power_mode": 1,
+  "fan_mode": 2,
+  "power_mode": 2,
   "optimized_gpu_offset": 20,
   "overlay": {
     "show": true,
     "top": true,
     "vertical": true,
     "opacity": 0.8,
-    "pos_x": 2475,
-    "pos_y": 1168,
+    "pos_x": 2466,
+    "pos_y": 1302,
     "cpu_warn": 70,
     "cpu_crit": 80,
     "gpu_warn": 60,

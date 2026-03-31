@@ -3,6 +3,7 @@
 #include "OmenEc.h"
 #include "PowerControl.h"
 #include "ThermalService.h"
+#include "MemoryService.h"
 #include <chrono>
 #include <intrin.h>
 #include <algorithm>
@@ -219,3 +220,5 @@ void OmenHal::SetFanControlMode(int mode) {
 void *OmenHal::GetCpuCurve() { return (void *)FanService::Get().GetCpuCurve(); }
 
 void *OmenHal::GetGpuCurve() { return (void *)FanService::Get().GetGpuCurve(); }
+
+void OmenHal::OptimizeMemory() { MemoryService::Get().Optimize(); }
