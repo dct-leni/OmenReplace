@@ -71,7 +71,8 @@ void FanService::SaveConfig() {
   f << "    \"gpu_crit\": " << m_overlayConfig.gpuCrit << ",\n";
   f << "    \"disk_warn\": " << m_overlayConfig.diskWarn << ",\n";
   f << "    \"disk_crit\": " << m_overlayConfig.diskCrit << ",\n";
-  f << "    \"battery_limit\": " << m_overlayConfig.batteryLimit << "\n";
+  f << "    \"battery_limit\": " << m_overlayConfig.batteryLimit << ",\n";
+  f << "    \"amd_curve_optimizer\": " << PowerControl::Get().GetCachedAmdCurveOptimizer() << "\n";
   f << "  },\n";
 
   auto writeCurve = [&](const char *name, CurvePoint *pts) {
@@ -199,6 +200,13 @@ void FanService::LoadConfig() {
       
       if (line.find("\"battery_limit\"") != std::string::npos) {
         try { m_overlayConfig.batteryLimit = std::stoi(getVal(line)); } catch (...) {}
+      }
+      if (line.find("\"amd_curve_optimizer\"") != std::string::npos) {
+        try { 
+          int val = std::stoi(getVal(line));
+          if (val >= -30 && val <= 30)
+            PowerControl::Get().SetCachedAmdCurveOptimizer(val);
+        } catch (...) {}
       }
     }
 

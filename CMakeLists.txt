@@ -5,6 +5,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_compile_definitions(UNICODE _UNICODE)
 
+# Set output directory to ./output
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/output)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}/output)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}/output)
+
 # --- Size Optimizations (Lightweight Binaries) ---
 if(MINGW)
     # -Os: Optimize for size
@@ -19,10 +24,9 @@ file(GLOB_RECURSE SRC "src/*.cpp")
 set(IMGUI_DIR "${CMAKE_SOURCE_DIR}/vendor/imgui")
 set(IMGUI_SRC 
     "${IMGUI_DIR}/imgui.cpp"
-    "${IMGUI_DIR}/imgui_demo.cpp"
     "${IMGUI_DIR}/imgui_draw.cpp"
-    "${IMGUI_DIR}/imgui_tables.cpp"
     "${IMGUI_DIR}/imgui_widgets.cpp"
+    "${IMGUI_DIR}/imgui_tables.cpp"
     "${IMGUI_DIR}/backends/imgui_impl_dx11.cpp"
     "${IMGUI_DIR}/backends/imgui_impl_win32.cpp"
 )
@@ -42,11 +46,6 @@ target_link_libraries(OmenReplace PRIVATE
     d3d11 dxgi d3dcompiler wbemuuid dwmapi imm32 ole32 oleaut32 powrprof pdh psapi
 )
 
-# --- Custom Commands ---
-# Clean log files before build
-add_custom_command(TARGET OmenReplace PRE_BUILD
-    COMMAND ${CMAKE_COMMAND} -E remove -f 
-        "${CMAKE_SOURCE_DIR}/sensor_debug.log"
-        "${CMAKE_SOURCE_DIR}/pawnio_debug.log"
-    COMMENT "Cleaning debug log files"
-)
+# --- Install target ---
+install(TARGETS OmenReplace DESTINATION .)
+

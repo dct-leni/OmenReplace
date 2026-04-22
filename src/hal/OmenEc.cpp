@@ -1,4 +1,7 @@
 #include "OmenEc.h"
+#include "LpcModuleData.h"
+#include "SmuModuleData.h"
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -6,7 +9,14 @@
 
 void LogEc(const std::string &msg) {}
 
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+
 static HANDLE s_ecMutex = NULL;
+static HANDLE s_pciMutex = NULL;
+
+
 
 OmenEc::OmenEc() {}
 OmenEc::~OmenEc() {
@@ -14,6 +24,8 @@ OmenEc::~OmenEc() {
     CloseHandle(s_ecMutex);
   if (m_pawn)
     delete m_pawn;
+  if (m_smuPawn)
+    delete m_smuPawn;
 }
 
 OmenEc &OmenEc::Get() {
@@ -26,15 +38,24 @@ bool OmenEc::Initialize() {
     return true;
   LogEc("=== Omen EC Initialization ===");
   s_ecMutex = CreateMutexA(NULL, FALSE, "Global\\Access_EC");
-  if (!PawnIO::InitLibrary())
+  s_pciMutex = CreateMutexA(NULL, FALSE, "Global\\Access_PCI");
+
+  if (!PawnIO::InitLibrary()) {
+    LogEc("PawnIO::InitLibrary failed");
     return false;
+  }
   m_pawn = new PawnIO();
 
-#include "LpcModuleData.h"
   if (!m_pawn->LoadBuffer(LPC_ACPI_EC_BIN, LPC_ACPI_EC_BIN_SIZE)) {
     LogEc("Failed to load embedded EC module");
     return false;
   }
+  m_smuPawn = new PawnIO();
+  if (!m_smuPawn->LoadBuffer(RYZEN_SMU_BIN, RYZEN_SMU_BIN_SIZE)) {
+    LogEc("Failed to load embedded SMU module");
+    return false;
+  }
+  LogEc("OmenEc initialized successfully");
   m_initialized = true;
   return true;
 }
@@ -163,40 +184,30 @@ float OmenEc::GetGpuTemp() { return (float)ReadByte(EC_GPU_TEMP); }
 
 void OmenEc::SetFanMode(bool manual) {
   if (manual) {
-    // OmenMon Sequence: Manual = 0x06 (NOT 0x01!)
-    WriteByte(EC_OMCC, 0x06); // Manual On (OmenMon value)
-    // EC_XFCD (0x63) is the manual-fan countdown register.
-    // We set it to 0x1E (30 seconds). If our app crashes and stops pinging,
-    // the hardware will safely revert to auto mode after 30s.
-    WriteByte(EC_XFCD, 0x1E); // 30s hardware watchdog
-    WriteByte(EC_SFAN, 0x00); // Fan Switch On
+    WriteByte(EC_OMCC, 0x06); 
+    WriteByte(EC_XFCD, 0x1E); 
+    WriteByte(EC_SFAN, 0x00); 
   } else {
     RestoreAutoControl();
   }
 }
 
 void OmenEc::RestoreAutoControl() {
-  // OmenMon Authoritative Sequence for BIOS Handover:
-  // 1. Set fan speeds to MAX (0xFF) to signal "release"
   WriteByte(EC_XSS1, 0xFF);
   WriteByte(EC_XSS2, 0xFF);
-  WriteByte(0x34, 0xFF); // SRP1
-  WriteByte(0x35, 0xFF); // SRP2
+  WriteByte(0x34, 0xFF); 
+  WriteByte(0x35, 0xFF); 
 
-  // 2. Clear all manual control toggles
-  WriteByte(EC_OMCC, 0x00); // Manual Mode Off
-  WriteByte(EC_XFCD, 0x00); // Heartbeat Off
-  WriteByte(EC_FFFF, 0x00); // Max Fan Off
-  WriteByte(EC_SFAN, 0x00); // Fan Switch On (for BIOS)
+  WriteByte(EC_OMCC, 0x00); 
+  WriteByte(EC_XFCD, 0x00); 
+  WriteByte(EC_FFFF, 0x00); 
+  WriteByte(EC_SFAN, 0x00); 
 
-  Sleep(100); // Allow EC to process state change
+  Sleep(100); 
 }
 
-// Heartbeat: reset the EC countdown to 30 seconds.
-// We DO NOT disable the countdown here; if the app freezes, we want
-// the hardware to safely revert to auto mode to prevent overheating.
 void OmenEc::FanHeartbeat() {
-  WriteByte(EC_XFCD, 0x1E); // 30s hardware watchdog re-arm
+  WriteByte(EC_XFCD, 0x1E); 
 }
 
 void OmenEc::SetFanSpeedPercent(int fanIndex, int percent) {
@@ -210,15 +221,14 @@ void OmenEc::SetFanSpeedPercent(int fanIndex, int percent) {
 
   if (fanIndex == 0) {
     WriteByte(EC_XSS1, valPercent);
-    WriteByte(0x34, valKrpm); // SRP1
+    WriteByte(0x34, valKrpm); 
   } else {
     WriteByte(EC_XSS2, valPercent);
-    WriteByte(0x35, valKrpm); // SRP2
+    WriteByte(0x35, valKrpm); 
   }
 
-  // Pulse the apply bit to latch targets, then re-arm 30s heartbeat
-  WriteByte(EC_OMCC, 0x06); // keep manual flag set (not just 0x01)
-  WriteByte(EC_XFCD, 0x1E); // 30s watchdog
+  WriteByte(EC_OMCC, 0x06); 
+  WriteByte(EC_XFCD, 0x1E); 
 }
 
 float OmenEc::GetSsd1Temp() { return (float)ReadByte(0x47); }
@@ -231,20 +241,71 @@ std::vector<uint8_t> OmenEc::ReadEcRange(uint8_t start, uint8_t count) {
   }
   return data;
 }
+
 bool OmenEc::PciWriteDword(uint8_t bus, uint8_t dev, uint8_t func, uint32_t reg, uint32_t val) {
-  if (!m_pawn) return false;
-  std::vector<uint64_t> in = { (uint64_t)bus, (uint64_t)dev, (uint64_t)func, (uint64_t)reg, (uint64_t)val };
-  std::vector<uint64_t> out;
-  return m_pawn->Execute("ioctl_pci_write_config_dword", in, out);
+  if (!m_smuPawn) return false;
+  // Fallback to SMU aperture if it's the SMU registers we're talking to
+  if (bus == 0 && dev == 0 && func == 0 && (reg == 0xC4 || reg == 0xC8)) {
+     std::vector<uint64_t> in = { (uint64_t)reg, (uint64_t)val };
+     std::vector<uint64_t> out;
+     return m_smuPawn->Execute("ioctl_write_smu_register", in, out);
+  }
+  return false;
 }
 
 bool OmenEc::PciReadDword(uint8_t bus, uint8_t dev, uint8_t func, uint32_t reg, uint32_t& val) {
-  if (!m_pawn) return false;
-  std::vector<uint64_t> in = { (uint64_t)bus, (uint64_t)dev, (uint64_t)func, (uint64_t)reg };
-  std::vector<uint64_t> out = { 0 };
-  if (m_pawn->Execute("ioctl_pci_read_config_dword", in, out) && !out.empty()) {
+  if (!m_smuPawn) return false;
+  if (bus == 0 && dev == 0 && func == 0 && (reg == 0xC4 || reg == 0xC8)) {
+     std::vector<uint64_t> in = { (uint64_t)reg };
+     std::vector<uint64_t> out(1);
+     if (m_smuPawn->Execute("ioctl_read_smu_register", in, out)) {
+       val = (uint32_t)out[0];
+       return true;
+     }
+  }
+  return false;
+}
+
+bool OmenEc::SmuReadReg(uint32_t smnAddr, uint32_t& val) {
+  if (!m_smuPawn) return false;
+  std::vector<uint64_t> in = { (uint64_t)smnAddr };
+  std::vector<uint64_t> out(1);
+  if (m_smuPawn->Execute("ioctl_read_smu_register", in, out)) {
     val = (uint32_t)out[0];
     return true;
   }
   return false;
+}
+
+bool OmenEc::SmuWriteReg(uint32_t smnAddr, uint32_t val) {
+  if (!m_smuPawn) return false;
+  std::vector<uint64_t> in = { (uint64_t)smnAddr, (uint64_t)val };
+  std::vector<uint64_t> out;
+  return m_smuPawn->Execute("ioctl_write_smu_register", in, out);
+}
+
+bool OmenEc::SendSmuCommand(uint32_t msg, uint32_t* args) {
+  if (!m_smuPawn) return false;
+
+  // Sync hardware access to prevent collisions with other tools (Global\Access_PCI)
+  if (s_pciMutex) WaitForSingleObject(s_pciMutex, 1000);
+
+  std::vector<uint64_t> in = { (uint64_t)msg };
+  for (int i = 0; i < 6; i++) in.push_back((uint64_t)args[i]);
+
+  // IMPORTANT: out vector MUST be pre-sized to 6 for the driver to accept it
+  std::vector<uint64_t> out(6, 0);
+  bool success = m_smuPawn->Execute("ioctl_send_smu_command", in, out);
+
+  if (success) {
+    for (int i = 0; i < 6 && i < out.size(); i++) {
+      args[i] = (uint32_t)out[i];
+    }
+  }
+
+
+
+  if (s_pciMutex) ReleaseMutex(s_pciMutex);
+
+  return success;
 }

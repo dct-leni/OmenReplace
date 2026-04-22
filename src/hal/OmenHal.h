@@ -54,7 +54,10 @@ public:
   int GetCpuCoreOffset();
   int GetCpuCacheOffset();
   bool SetCpuUndervolt(int coreMv, int cacheMv);
+  int GetAmdCurveOptimizer();
   bool SetAmdCurveOptimizer(int coCounts);
+  int GetCachedAmdCurveOptimizer();
+  void SetCachedAmdCurveOptimizer(int val);
 
   bool IsAmd() { return m_cpuBrand == 1; }
   bool IsIntel() { return m_cpuBrand == 2; }

@@ -1,6 +1,7 @@
 #include "Overlay.h"
 #include "hal/FanService.h"
 #include "hal/OmenHal.h"
+#include "hal/OmenEc.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -8,6 +9,7 @@
 #include <string>
 #include <vector>
 #include <windows.h>
+#include <sstream>
 
 // DWM Types for dynamic loading
 typedef struct _MARGINS {
@@ -833,26 +835,43 @@ void Overlay::Render(OmenHal &hal) {
 
         if (isAmd) {
           static int coOff = 0; // Curve Optimizer
-          ImGui::Text("All-Core CO:");
+          static bool coRead = false;
+          // Read actual CO value from hardware when Options tab first opens
+          if (!optionsWasOpen || !coRead) {
+            // Priority: 1. Config Cache, 2. Hardware Read
+            int cached = hal.GetCachedAmdCurveOptimizer();
+            if (cached != 0) {
+              coOff = cached;
+            } else {
+              int hwVal = hal.GetAmdCurveOptimizer();
+              if (hwVal >= -30 && hwVal <= 30)
+                coOff = hwVal;
+            }
+            coRead = true;
+          }
+
+          ImGui::Text("All-Core CO Undervolt:");
           ImGui::SameLine();
           ImGui::TextDisabled("(?)");
           if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip(
-                "AMD Curve Optimizer:\n"
-                "- 1 count is approx 3-5mV\n"
-                "- Higher negative values = lower voltage\n"
-                "- Rec: Ryzen 5000/6000/7000 usually run well at -15 to -20\n"
+                "AMD Curve Optimizer Undervolt:\n"
+                "- 1 count is approx 3-5mV offset\n"
+                "- Range: -30 (Overvolt) to 30 (Undervolt)\n"
+                "- Rec: Ryzen 7000 usually run well at 15 to 20\n"
                 "- Always test stability under load (e.g. Cinebench)\n"
-                "- 0 is Default (no undervolt)");
+                "- 0 is Default (no offset)");
           }
 
-          ImGui::SetNextItemWidth(-76); // Stretches leaving 76px for SameLine button
-          ImGui::SliderInt("##AmdCO", &coOff, -30, 0, "%d counts");
+          ImGui::SetNextItemWidth(-76); 
+          if (ImGui::SliderInt("##AmdCO", &coOff, -30, 30, "%d counts")) {
+          }
           ImGui::SameLine();
           if (ImGui::Button("SET##amd", ImVec2(70, 22))) {
             hal.SetAmdCurveOptimizer(coOff);
+            FanService::Get().SaveConfig();
           }
-          ImGui::TextDisabled("Start at -15, test stability, then lower if stable.");
+          ImGui::TextDisabled("Range: -30 (Overvolt) to 30 (Undervolt).");
         } else {
           static int coreMv = hal.GetCpuCoreOffset();
           static int cacheMv = hal.GetCpuCacheOffset();

@@ -502,41 +502,68 @@ bool PowerControl::SetCpuUndervolt(int coreMv, int cacheMv) {
   return false; // Not yet fully implemented due to driver setup
 }
 bool PowerControl::SetAmdCurveOptimizer(int coCounts) {
-  // Safety clamp (Undervolt only for now: -30 to 0)
+  // Safety clamp: -30 to +30
   int counts = coCounts;
-  if (counts < -30)
-    counts = -30;
-  if (counts > 0)
-    counts = 0;
-
-  uint32_t val =
-      (counts < 0) ? (0x100000 - (uint32_t)(-counts)) : (uint32_t)counts;
-
-  // Use SMU messaging via OmenEc
-  // Command 0x5D is All-Core CO for Phoenix/Rembrandt
-  // Using common mailbox addresses for modern Omen AMD
-  uint32_t addrMsg = 0x03B10A20;
-  uint32_t addrRsp = 0x03B10A80;
-  uint32_t addrArg = 0x03B10A88;
+  if (counts < -30) counts = -30;
+  if (counts > 30) counts = 30;
 
   OmenEc &ec = OmenEc::Get();
 
-  // Write Argument
-  ec.PciWriteDword(0, 0, 0, 0xB8, addrArg);
-  ec.PciWriteDword(0, 0, 0, 0xBC, val);
+  // For Dragon Range / Raphael, the SET command is 0x07
+  // The value is encoded as: 0x100000 - abs(counts) for negative values
+  uint32_t uvalue = (counts < 0) ? (uint32_t)(0x100000 - (uint32_t)(-counts)) : (uint32_t)counts;
 
-  // Write Message
-  ec.PciWriteDword(0, 0, 0, 0xB8, addrMsg);
-  ec.PciWriteDword(0, 0, 0, 0xBC, 0x5D);
+  bool anySuccess = false;
 
-  // Wait for response
-  uint32_t res = 0;
-  for (int i = 0; i < 50; i++) {
-    ec.PciWriteDword(0, 0, 0, 0xB8, addrRsp);
-    if (ec.PciReadDword(0, 0, 0, 0xBC, res) && res != 0)
-      break;
-    Sleep(1);
+  for (int i = 0; i < 16; i++) {
+    int ccd = i / 8;
+    int core = i % 8;
+    uint32_t coreMask = ((uint32_t)((ccd << 8) | core)) << 20;
+    
+    // Arg0 = (CoreMask << 20) | encoded_value
+    uint32_t args[6] = {coreMask | (uvalue & 0xFFFFF), 0, 0, 0, 0, 0};
+
+    if (ec.SendSmuCommand(0x07, args))
+      anySuccess = true;
   }
 
-  return res == 1;
+  if (anySuccess) m_amdCurveOptimizer = coCounts;
+  return anySuccess;
 }
+
+int PowerControl::GetAmdCurveOptimizer() {
+  OmenEc &ec = OmenEc::Get();
+  if (!ec.IsInitialized()) return 0;
+
+  // Command 0xD5 is the verified 'Get' command for Dragon Range
+  // It returns the value as a 32-bit signed integer in Arg0
+  uint32_t cmd = 0xD5;
+  uint32_t args[6] = {0, 0, 0, 0, 0, 0};
+
+  if (ec.SendSmuCommand(cmd, args)) {
+    uint32_t val = args[0];
+    if (val == 0) return 0;
+
+    int result = 0;
+    // Handle 32-bit signed negative (e.g. 0xfffffff6 = -10)
+    if (val > 0xFFFFFF00) {
+      result = (int)((int32_t)val);
+    }
+    // Handle 20-bit signed negative
+    else if (val > 0xFFF00 && val < 0x100000) {
+      result = -(int)(0x100000 - val);
+    }
+    // Positive
+    else if (val > 0 && val <= 30) {
+      result = (int)val;
+    }
+
+    if (result >= -30 && result <= 30) {
+      m_amdCurveOptimizer = result;
+      return result;
+    }
+  }
+
+  return 0;
+}
+

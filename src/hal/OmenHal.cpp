@@ -112,6 +112,18 @@ bool OmenHal::SetAmdCurveOptimizer(int coCounts) {
   return PowerControl::Get().SetAmdCurveOptimizer(coCounts);
 }
 
+int OmenHal::GetCachedAmdCurveOptimizer() {
+  return PowerControl::Get().GetCachedAmdCurveOptimizer();
+}
+
+void OmenHal::SetCachedAmdCurveOptimizer(int val) {
+  PowerControl::Get().SetCachedAmdCurveOptimizer(val);
+}
+
+int OmenHal::GetAmdCurveOptimizer() {
+  return PowerControl::Get().GetAmdCurveOptimizer();
+}
+
 bool OmenHal::GetIsDesktop() { return m_isDesktop; }
 
 bool OmenHal::GetIsAnotherFanControllerActive() {

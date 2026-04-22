@@ -2,6 +2,10 @@
 #include <windows.h>
 #include <cstdint>
 #include "PawnIO.h"
+#include <string>
+
+void LogEc(const std::string& msg);
+void LogSmu(const std::string& msg);
 
 // Hardware Abstraction for Omen Embedded Controller
 // Implements fan speed reading and control
@@ -23,6 +27,13 @@ public:
     // PCI Config Access via PawnIO
     bool PciWriteDword(uint8_t bus, uint8_t dev, uint8_t func, uint32_t reg, uint32_t val);
     bool PciReadDword(uint8_t bus, uint8_t dev, uint8_t func, uint32_t reg, uint32_t& val);
+
+    // SMU Communication (AMD Ryzen)
+    // Uses PCI config registers 0xC4/0xC8 to access SMN (System Management Network)
+    bool SmuReadReg(uint32_t smnAddr, uint32_t& val);
+    bool SmuWriteReg(uint32_t smnAddr, uint32_t val);
+    // Send a command to the SMU via RSMU mailbox. args is 6-element array (in/out).
+    bool SendSmuCommand(uint32_t cmd, uint32_t* args);
     
     // Fan Control
     void SetFanMode(bool manual);
@@ -53,6 +64,7 @@ private:
     
     bool m_initialized = false;
     PawnIO* m_pawn = nullptr;
+    PawnIO* m_smuPawn = nullptr;
     
     // Helpers
     uint8_t ReadPort(uint16_t port);

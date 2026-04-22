@@ -1,11 +1,19 @@
 external_source/
-
+CMakeFiles/
+build/
+output/
 .cache/
 .vscode/
 .agents/
 
-build/bin/
-build_*.txt
-build/*.log
-build/.cmake/
-build/CMakeFiles/OmenReplace.dir/
+CMakeCache.txt
+Makefile
+cmake_install.cmake
+*.cmake
+*.a
+*.lib
+*.exe
+*.obj
+*.o
+*.pdb
+*.ilk

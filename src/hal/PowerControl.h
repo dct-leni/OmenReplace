@@ -45,7 +45,10 @@ public:
   int GetCpuCoreOffset();
   int GetCpuCacheOffset();
   bool SetCpuUndervolt(int coreMv, int cacheMv);
+  int GetAmdCurveOptimizer();  // Read current all-core CO value from SMU
   bool SetAmdCurveOptimizer(int coCounts);
+  int GetCachedAmdCurveOptimizer() { return m_amdCurveOptimizer; }
+  void SetCachedAmdCurveOptimizer(int val) { m_amdCurveOptimizer = val; }
 
   // Battery Care
   int GetBatteryChargeLimit();
@@ -65,6 +68,7 @@ private:
   PowerMode m_currentMode = PowerMode::Balanced;
   int m_gpuMode = -1; // 0=Hybrid, 1=Discrete, 2=Optimus
   int m_batteryLimitPercent = 100; // Cached battery threshold (WMI only knows on/off)
+  int m_amdCurveOptimizer = 0;
 
   // WMI HP BIOS Helper
   bool CallHpBios(uint32_t cmd, uint32_t type, uint8_t *data, size_t size,
