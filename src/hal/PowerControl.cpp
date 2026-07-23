@@ -10,7 +10,9 @@
 #include <objbase.h>
 #include <powrprof.h>
 
+#ifdef _MSC_VER
 #pragma comment(lib, "powrprof.lib")
+#endif
 
 // Windows Power Plan GUIDs (Standard)
 static const GUID GUID_SAVER = {
@@ -70,16 +72,9 @@ void PowerControl::Update() {
   else if (mode == 0x02 || mode == 0x50 || mode == 0x03)
     detectedEc = PowerMode::Eco;
 
-  // 2. Read Windows Power Plan
+  // 2. Read Windows Power Plan (free active plan GUID to avoid leak)
   GUID *activePlan = NULL;
-  PowerMode detectedWin = detectedEc;
   if (PowerGetActiveScheme(NULL, &activePlan) == ERROR_SUCCESS) {
-    if (IsEqualGUID(*activePlan, GUID_SAVER))
-      detectedWin = PowerMode::Eco;
-    else if (IsEqualGUID(*activePlan, GUID_BALANCED))
-      detectedWin = PowerMode::Balanced;
-    else if (IsEqualGUID(*activePlan, GUID_PERF))
-      detectedWin = PowerMode::Performance;
     LocalFree(activePlan);
   }
 
@@ -300,7 +295,7 @@ int PowerControl::GetBatteryChargeLimit() {
   // WMI only tells us enabled(0x01) or disabled(0x00).
   // If disabled -> 100%. If enabled -> return saved custom percentage (or 80
   // default).
-  uint8_t inData[4] = {0, 0, 0, 0};
+
   WmiHelper wmi;
   if (!wmi.Initialize())
     return m_batteryLimitPercent; // return cached value on WMI failure
@@ -365,31 +360,21 @@ void PowerControl::SetMode(PowerMode mode) {
   CheckThermalPolicy();
 
   uint8_t ecValue = 0x00;
-  uint8_t biosValue = 0x30; // Default V1
   uint8_t gpuLevel = 1;     // Medium
 
   switch (mode) {
   case PowerMode::Eco:
     ecValue = 0x02;
-    biosValue = (m_thermalPolicy == ThermalPolicyVersion::V0_Legacy)
-                    ? 0x02
-                    : 0x50; // Cool
-    gpuLevel = 0;           // Min
+    gpuLevel = 0; // Min
     break;
   case PowerMode::Balanced:
     ecValue = 0x00;
-    biosValue = (m_thermalPolicy == ThermalPolicyVersion::V0_Legacy)
-                    ? 0x00
-                    : 0x30; // Default
-    gpuLevel = 1;           // Med
+    gpuLevel = 1; // Med
     break;
   case PowerMode::Performance:
   case PowerMode::Turbo:
     ecValue = 0x01;
-    biosValue = (m_thermalPolicy == ThermalPolicyVersion::V0_Legacy)
-                    ? 0x01
-                    : 0x31; // Perf
-    gpuLevel = 2;           // Max
+    gpuLevel = 2; // Max
     break;
   }
 
@@ -429,7 +414,7 @@ void PowerControl::SetWindowsPowerPlan(PowerMode mode) {
       else if (mode == PowerMode::Performance || mode == PowerMode::Turbo)
         overlay = GUID_OVERLAY_PERFORMANCE;
 
-      DWORD res = pSetActiveOverlay(&overlay);
+      pSetActiveOverlay(&overlay);
       return;
     }
   }

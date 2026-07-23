@@ -298,7 +298,7 @@ bool OmenEc::SendSmuCommand(uint32_t msg, uint32_t* args) {
   bool success = m_smuPawn->Execute("ioctl_send_smu_command", in, out);
 
   if (success) {
-    for (int i = 0; i < 6 && i < out.size(); i++) {
+    for (size_t i = 0; i < 6 && i < out.size(); i++) {
       args[i] = (uint32_t)out[i];
     }
   }

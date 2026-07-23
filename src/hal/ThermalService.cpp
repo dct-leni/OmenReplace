@@ -6,7 +6,9 @@
 
 // Windows Headers for CPU Load (PDH)
 #include <pdh.h>
+#ifdef _MSC_VER
 #pragma comment(lib, "pdh.lib")
+#endif
 
 // Helper for CPU Load
 static PDH_HQUERY cpuQuery;

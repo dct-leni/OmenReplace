@@ -5,6 +5,7 @@ output/
 .cache/
 .vscode/
 .agents/
+.codegraph/
 
 CMakeCache.txt
 Makefile
@@ -16,4 +17,4 @@ cmake_install.cmake
 *.obj
 *.o
 *.pdb
-*.ilk
+*.ilk

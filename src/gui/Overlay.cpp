@@ -33,82 +33,6 @@ static ImVec4 TempColor(float t, float warn, float crit) {
   return ImVec4(0.3f, 1.0f, 0.5f, 1.0f);
 }
 
-// Lerp between two ImU32 colors
-static ImU32 LerpColor(ImU32 a, ImU32 b, float t) {
-  float ar = ((a >> 0) & 0xFF) / 255.0f;
-  float ag = ((a >> 8) & 0xFF) / 255.0f;
-  float ab = ((a >> 16) & 0xFF) / 255.0f;
-  float aa = ((a >> 24) & 0xFF) / 255.0f;
-  float br = ((b >> 0) & 0xFF) / 255.0f;
-  float bg = ((b >> 8) & 0xFF) / 255.0f;
-  float bb = ((b >> 16) & 0xFF) / 255.0f;
-  float ba = ((b >> 24) & 0xFF) / 255.0f;
-  return IM_COL32(
-      (int)((ar + (br - ar) * t) * 255), (int)((ag + (bg - ag) * t) * 255),
-      (int)((ab + (bb - ab) * t) * 255), (int)((aa + (ba - aa) * t) * 255));
-}
-
-// NOTHING PHONE style dot-gauge with centered text and dynamic coloring
-// warn/crit are fractions 0..1 (not the raw temp values)
-static void DrawRingGauge(ImDrawList *dl, ImVec2 center, float radius,
-                          float val, float maxVal, float warnFrac,
-                          float critFrac, const char *label,
-                          ImFont *font = nullptr) {
-  const float kPi = 3.14159265f;
-  // Arc span: 300 degrees as requested (allows space at bottom)
-  const float arcSpan = kPi * 1.666f;
-  const float arcStart = kPi * 0.5f + (kPi * 2.0f - arcSpan) * 0.5f;
-
-  float pct = std::clamp(val / maxVal, 0.0f, 1.0f);
-  float thickness = std::max(3.0f, radius * 0.22f);
-  int numDots = 20; // Reduced dots for smaller size
-
-  // Background dots (track)
-  for (int i = 0; i < numDots; i++) {
-    float angle = arcStart + (arcSpan / numDots) * i;
-    float dx = cosf(angle), dy = sinf(angle);
-    ImVec2 p(center.x + dx * radius, center.y + dy * radius);
-    dl->AddCircleFilled(p, thickness * 0.35f, IM_COL32(255, 255, 255, 25));
-  }
-
-  // Active dots
-  ImU32 valColor =
-      ImGui::GetColorU32(TempColor(val, warnFrac * maxVal, critFrac * maxVal));
-  int activeDots = (int)(pct * numDots);
-  if (pct > 0.0f && activeDots == 0)
-    activeDots = 1;
-
-  for (int i = 0; i < activeDots; i++) {
-    float angle = arcStart + (arcSpan / numDots) * i;
-    float dx = cosf(angle), dy = sinf(angle);
-    ImVec2 p(center.x + dx * radius, center.y + dy * radius);
-    dl->AddCircleFilled(p, thickness * 0.45f, valColor);
-
-    // Tip glow for the last dot
-    if (i == activeDots - 1) {
-      dl->AddCircleFilled(p, thickness * 0.70f, IM_COL32(255, 255, 255, 80));
-    }
-  }
-
-  // Centered temperature text (10% bigger)
-  float fontSizeScale = radius * 0.75f;
-  char valBuf[16];
-  sprintf(valBuf, "%.0f C", val);  // Simple C since degree overlaps font tables
-
-  ImVec2 tSz = font ? font->CalcTextSizeA(fontSizeScale, FLT_MAX, 0.0f, valBuf)
-                    : ImGui::CalcTextSize(valBuf);
-  dl->AddText(font, fontSizeScale,
-              ImVec2(center.x - tSz.x * 0.5f, center.y - tSz.y * 0.6f),
-              valColor, valBuf);
-
-  // Label text — warm near-white
-  float labelScale = radius * 0.50f;
-  ImVec2 lSz = font ? font->CalcTextSizeA(labelScale, FLT_MAX, 0.0f, label)
-                    : ImGui::CalcTextSize(label);
-  dl->AddText(font, labelScale,
-              ImVec2(center.x - lSz.x * 0.5f, center.y + radius + 2.0f),
-              IM_COL32(210, 190, 190, 220), label);
-}
 
 static void DrawFanModern(ImDrawList *dl, ImVec2 center, float radius,
                           float angle, ImU32 color) {
@@ -147,9 +71,8 @@ static void DrawDiskIcon(ImDrawList *dl, ImVec2 p, float s, ImU32 color) {
 // ---- Overlay Class Implementation ----
 
 Overlay::Overlay()
-    : m_draggingIdx(-1), m_draggingId(nullptr), m_showEditor(false),
-      m_showOptions(false), m_showOverlayHUD(false), m_hudOpacity(0.9f),
-      m_hudSize(ImVec2(220, 130)), m_hudResizable(false),
+    : m_draggingIdx(-1), m_draggingId(nullptr), m_showOverlayHUD(false),
+      m_hudOpacity(0.9f), m_hudSize(ImVec2(220, 130)), m_hudResizable(false),
       m_hudAlwaysOnTop(false), m_hudVertical(false), m_hudPos(ImVec2(100, 100)),
       m_hwnd(NULL), m_trayMode(false), m_trayIcon(NULL) {
   ZeroMemory(&m_nid, sizeof(m_nid));
@@ -237,7 +160,6 @@ void Overlay::RemoveTrayIcon() {
   }
 }
 
-void Overlay::UpdateTrayIcon(float /*cpuTemp*/, float /*gpuTemp*/) {}
 
 void Overlay::RestoreFromTray() {
   if (!m_hwnd)
@@ -777,7 +699,6 @@ void Overlay::Render(OmenHal &hal) {
       bool optionsIsOpen = ImGui::BeginTabItem("Options");
       if (optionsIsOpen) {
         // Refresh hardware states when tab is first opened
-        static int batLimit = 100;
         static PowerControl::GpuOverclockSettings ocSettings;
 
         if (!optionsWasOpen) {
@@ -1050,14 +971,21 @@ void Overlay::Render(OmenHal &hal) {
                                        LWA_COLORKEY | LWA_ALPHA);
 
             // Always-on-top
-            bool isTop =
-                (GetWindowLong(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
-            if (m_hudAlwaysOnTop && !isTop)
-              SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                           SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            else if (!m_hudAlwaysOnTop && isTop)
-              SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
-                           SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            if (m_hudAlwaysOnTop) {
+              // Bring to top periodically (every 30 frames, approx. 500ms) to stay on top of fullscreen apps/games
+              static int topmostCheckFrame = 0;
+              bool isTop = (GetWindowLong(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+              if (!isTop || (++topmostCheckFrame % 30 == 0)) {
+                SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+              }
+            } else {
+              bool isTop = (GetWindowLong(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+              if (isTop) {
+                SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+              }
+            }
           }
         }
       }

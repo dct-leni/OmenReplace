@@ -228,8 +228,6 @@ void FanService::LoadConfig() {
 
 static int MapCurve(CurvePoint *points, float temp) {
   // Current Scale is 40-90 as requested
-  float tMin = 40.0f;
-  float tMax = 90.0f;
 
   if (temp <= points[0].temp)
     return points[0].speed;

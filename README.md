@@ -26,7 +26,7 @@ A fully interactive graph to design your own cooling profile.
 -   **Independent Control**: Create separate curves for CPU and GPU fans or synchronize them with a single click.
 -   **Real-time Feedback**: View a live indicator of where your hardware currently sits on the curve.
 
-### ⚙️ advanced Options
+### ⚙️ Advanced Options
 Deep hardware tuning for enthusiasts.
 -   **Power Modes**: Quickly switch between **Eco**, **Balanced**, and **Turbo** profiles.
 -   **GPU Mode Control**: Switch between **Hybrid**, **Discrete**, and **Integrated** GPU modes (requires reboot).
@@ -48,16 +48,100 @@ A premium, transparent HUD that stays on top of your games.
 
 ## 🚀 Getting Started
 
-### Requirements
--   **HP OMEN** hardware (Laptop or Desktop).
--   **Windows 10/11**.
--   **Administrator Privileges** (Required to communicate with the OMEN Embedded Controller and HAL).
+### Runtime Requirements
+-   **HP OMEN** hardware (Laptop or Desktop)
+-   **Windows 10/11**
+-   **Administrator Privileges** — required to communicate with the OMEN Embedded Controller and HAL
+-   **PawnIO** — kernel driver for low-level hardware access (EC/SMU communication).
 
-### Build from Source
-The project uses **CMake** and **Dear ImGui** (DX11 backend).
-1.  Clone the repository.
-2.  Open with Visual Studio or build via CMake.
-3.  Run `OmenReplace.exe` as Administrator.
+#### How to Install PawnIO
+PawnIO is required for this application to interface with the hardware. You must have `PawnIOLib.dll` and its driver.
+1. Download PawnIO from its official source.
+2. Install it so that `PawnIOLib.dll` is located at `C:\Program Files\PawnIO\PawnIOLib.dll`.
+3. Alternatively, you can place `PawnIOLib.dll` directly in the `output` folder next to `OmenReplace.exe`.
+
+---
+
+## 🔨 Build from Source
+
+### What is MSYS2 and MinGW-w64?
+To build this project, you need a C++ compiler. We use **MinGW-w64 GCC**, which is a Windows port of the GNU Compiler Collection. 
+**MSYS2** is simply a software distribution and building platform for Windows that provides a package manager (`pacman`) to easily download and install MinGW-w64 and other tools. It installs by default to `C:\msys64`.
+
+> [!WARNING]
+> **Should MSYS2 be added to the `vendor` folder?**
+> **No.** MSYS2 and the MinGW compiler toolchain are massive (~1GB+) and vary per user machine. They are system-level build tools and should *never* be committed to a project's source code or `vendor` folder. The `vendor` folder is only for lightweight code dependencies like ImGui.
+
+### Build Tool Requirements
+
+| Tool | Purpose | Install |
+|------|---------|---------|
+| **CMake ≥ 3.14** | Build system | `winget install Kitware.CMake` |
+| **MSYS2** | MinGW-w64 toolchain host | Place in `external_source\msys64` |
+| **MinGW-w64 GCC ≥ 13** | C++20 compiler | Via MSYS2 (see below) |
+| **mingw32-make** | Build runner | Via MSYS2 (see below) |
+
+> [!IMPORTANT]
+> The build script expects the **MSYS2 MinGW64** toolchain to be located in the project folder at `external_source\msys64\mingw64\bin`. Do **not** use Cygwin GCC or MSVC.
+
+### MSYS2 Package Requirements
+
+If setting up MSYS2 from scratch, download and extract/install MSYS2 into the `external_source\msys64` folder. Then open the **MSYS2 terminal** (`external_source\msys64\msys2.exe`) and run:
+
+```bash
+pacman -S --noconfirm mingw-w64-x86_64-gcc mingw-w64-x86_64-make
+```
+
+This single command installs everything the compiler needs:
+
+| MSYS2 Package | Provides |
+|---------------|---------|
+| `mingw-w64-x86_64-gcc` | GCC 15 C++20 compiler + linker |
+| `mingw-w64-x86_64-make` | `mingw32-make` build runner |
+| *(auto-dependency)* `mingw-w64-x86_64-binutils` | `ld`, `objdump`, `objcopy` |
+| *(auto-dependency)* `mingw-w64-x86_64-headers` | Windows SDK headers (d3d11, dxgi, wbemuuid, pdh, powrprof, etc.) |
+| *(auto-dependency)* `mingw-w64-x86_64-crt` | MinGW C runtime |
+| *(auto-dependency)* `mingw-w64-x86_64-winpthreads` | Static libpthread.a (baked into EXE at link time) |
+
+### Bundled / No Installation Needed
+
+| Dependency | Location | Notes |
+|-----------|----------|-------|
+| **Dear ImGui** | `vendor/imgui/` | Already in the repository |
+| **DirectX 11** (`d3d11`, `dxgi`, `d3dcompiler`) | Provided by MinGW-w64 headers | No Windows SDK install needed |
+| **WMI** (`wbemuuid`) | Provided by MinGW-w64 headers | — |
+| **PDH / Power / PSApi** (`pdh`, `powrprof`, `psapi`) | Provided by MinGW-w64 headers | — |
+| **DWM / IME / OLE** (`dwmapi`, `imm32`, `ole32`, `oleaut32`) | Provided by MinGW-w64 headers | — |
+
+> [!NOTE]
+> The resulting `OmenReplace.exe` is **fully standalone** — all MinGW runtime libraries (`libgcc`, `libstdc++`, `libwinpthread`) are statically baked in. No MSYS2 or MinGW required on the target machine.
+
+### Building
+
+Simply run `build.bat` from the project root:
+
+```powershell
+.\build.bat
+```
+
+The binary will be output to `output\OmenReplace.exe`.
+
+Or build manually:
+
+```powershell
+$env:PATH = "$PWD\external_source\msys64\mingw64\bin;" + $env:PATH
+
+cmake -G "MinGW Makefiles" `
+  -DCMAKE_MAKE_PROGRAM="$PWD/external_source/msys64/mingw64/bin/mingw32-make.exe" `
+  -DCMAKE_CXX_COMPILER="$PWD/external_source/msys64/mingw64/bin/g++.exe" `
+  -B build
+
+cmake --build build
+```
+
+### Running
+
+Run `output\OmenReplace.exe` as **Administrator** (required for EC/HAL access).
 
 ---
 

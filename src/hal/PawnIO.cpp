@@ -98,7 +98,7 @@ bool PawnIO::Load(const std::string &modulePath) {
   HRESULT hr = ((FnLoad)s_pfnLoad)(m_handle, buffer.data(), size);
   if (FAILED(hr)) {
     char msg[256];
-    sprintf(msg, "pawnio_load failed for %s: 0x%08X", modulePath.c_str(), hr);
+    sprintf(msg, "pawnio_load failed for %s: 0x%08lX", modulePath.c_str(), hr);
     LogPawnIO(msg);
     return false;
   }
@@ -115,7 +115,7 @@ bool PawnIO::LoadBuffer(const unsigned char *buffer, size_t size) {
       ((FnLoad)s_pfnLoad)(m_handle, (const UCHAR *)buffer, (SIZE_T)size);
   if (FAILED(hr)) {
     char msg[256];
-    sprintf(msg, "pawnio_load buffer failed: 0x%08X", hr);
+    sprintf(msg, "pawnio_load buffer failed: 0x%08lX", hr);
     LogPawnIO(msg);
     return false;
   }

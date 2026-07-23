@@ -57,7 +57,7 @@ bool OmenHal::Initialize() {
   char brand[0x40];
   memset(brand, 0, sizeof(brand));
   __cpuid(cpuInfo, 0x80000000);
-  if (cpuInfo[0] >= 0x80000004) {
+  if (cpuInfo[0] >= (int)0x80000004) {
     __cpuid((int *)(brand), 0x80000002);
     __cpuid((int *)(brand + 16), 0x80000003);
     __cpuid((int *)(brand + 32), 0x80000004);

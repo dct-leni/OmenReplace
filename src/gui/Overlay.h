@@ -9,7 +9,6 @@ public:
   ~Overlay();
 
   void Render(OmenHal &hal);
-  bool IsEditorVisible() const { return m_showEditor; }
   bool IsOverlayVisible() const { return m_showOverlayHUD; }
 
   // AutoStart
@@ -20,7 +19,6 @@ public:
   void SetHwnd(HWND hwnd) { m_hwnd = hwnd; }
   void SetupTrayIcon();
   void RemoveTrayIcon();
-  void UpdateTrayIcon(float cpuTemp, float gpuTemp);
   bool IsTrayMode() const { return m_trayMode; }
   void SetTrayMode(bool v) { m_trayMode = v; }
   void RestoreFromTray();
@@ -32,10 +30,6 @@ private:
   // Fan curve editor
   int m_draggingIdx;
   const char *m_draggingId;
-  bool m_showEditor;
-
-  // Popups
-  bool m_showOptions;
 
   // Overlay HUD
   bool m_showOverlayHUD;

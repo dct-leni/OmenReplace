@@ -96,7 +96,7 @@ bool WmiHelper::ExecQuery(const std::wstring &query,
   ULONG uReturn = 0;
   bool found = false;
   while (pEnumerator) {
-    HRESULT hr = pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
+    pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
     if (0 == uReturn)
       break;
 
@@ -145,7 +145,7 @@ bool WmiHelper::ExecQueryAll(const std::wstring &query,
   IWbemClassObject *pclsObj = NULL;
   ULONG uReturn = 0;
   while (pEnumerator) {
-    HRESULT hr = pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
+    pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
     if (0 == uReturn)
       break;
 

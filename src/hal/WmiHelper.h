@@ -9,7 +9,9 @@
 #include <windows.h>
 
 
+#ifdef _MSC_VER
 #pragma comment(lib, "wbemuuid.lib")
+#endif
 
 // Global struct to avoid scope issues
 struct LhmSensorResult {
