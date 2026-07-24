@@ -1,272 +1,259 @@
 #include "Overlay.h"
-#include "hal/FanService.h"
-#include "hal/OmenHal.h"
-#include "hal/OmenEc.h"
+#include "../hal/FanService.h"
+#include "../hal/OmenEc.h"
+#include "../hal/PowerControl.h"
+#include "imgui.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
+#include <shellapi.h>
 #include <string>
 #include <vector>
-#include <windows.h>
-#include <sstream>
-
-// DWM Types for dynamic loading
-typedef struct _MARGINS {
-  int cxLeftWidth;
-  int cxRightWidth;
-  int cyTopHeight;
-  int cyBottomHeight;
-} MARGINS, *PMARGINS;
-typedef HRESULT(WINAPI *DwmExtendFrameIntoClientAreaFunc)(HWND,
-                                                          const MARGINS *);
 
 #define WM_TRAYICON (WM_USER + 1)
-
-// ---- Helper Functions ----
+#define IDM_TRAY_RESTORE 1001
+#define IDM_TRAY_TOGGLE_HUD 1002
+#define IDM_TRAY_EXIT 1003
 
 static ImVec4 TempColor(float t, float warn, float crit) {
-  if (t >= crit)
-    return ImVec4(1.0f, 0.2f, 0.1f, 1.0f);
-  if (t >= warn)
-    return ImVec4(1.0f, 0.62f, 0.0f, 1.0f);
-  return ImVec4(0.3f, 1.0f, 0.5f, 1.0f);
+  if (t < warn)
+    return ImVec4(0.20f, 0.90f, 0.52f, 1.0f); // Green
+  if (t < crit)
+    return ImVec4(0.95f, 0.65f, 0.08f, 1.0f); // Yellow
+  return ImVec4(0.90f, 0.20f, 0.20f, 1.0f);   // Red
 }
 
+static ImVec4 PowerColor(float watts) {
+  if (watts < 60.0f)
+    return ImVec4(0.20f, 0.90f, 0.52f, 1.0f); // Green under 60W
+  if (watts <= 150.0f)
+    return ImVec4(0.95f, 0.65f, 0.08f, 1.0f); // Yellow until 150W
+  return ImVec4(0.90f, 0.20f, 0.20f, 1.0f);   // Red above 150W
+}
 
-static void DrawFanModern(ImDrawList *dl, ImVec2 center, float radius,
-                          float angle, ImU32 color) {
-  dl->AddCircle(center, radius + 1, ImGui::GetColorU32(ImVec4(1, 1, 1, 0.05f)),
-                32, 1.0f);
-  for (int i = 0; i < 4; i++) {
-    float a = angle + (i * 1.5708f);
-    ImVec2 p1(center.x + cosf(a) * radius, center.y + sinf(a) * radius);
-    ImVec2 p2(center.x + cosf(a + 0.38f) * (radius * 0.5f),
-              center.y + sinf(a + 0.38f) * (radius * 0.5f));
-    dl->AddTriangleFilled(center, p1, p2, color);
+static void DrawCpuIcon(ImDrawList *dl, ImVec2 pos, float size, ImU32 col) {
+  dl->AddRect(pos, ImVec2(pos.x + size, pos.y + size), col, 1.0f, 0, 1.5f);
+  float inner = size * 0.4f;
+  float offset = (size - inner) * 0.5f;
+  dl->AddRectFilled(ImVec2(pos.x + offset, pos.y + offset),
+                    ImVec2(pos.x + offset + inner, pos.y + offset + inner),
+                    col);
+  float pinLen = 2.0f;
+  dl->AddLine(ImVec2(pos.x + size * 0.3f, pos.y - pinLen),
+              ImVec2(pos.x + size * 0.3f, pos.y), col, 1.0f);
+  dl->AddLine(ImVec2(pos.x + size * 0.7f, pos.y - pinLen),
+              ImVec2(pos.x + size * 0.7f, pos.y), col, 1.0f);
+  dl->AddLine(ImVec2(pos.x + size * 0.3f, pos.y + size),
+              ImVec2(pos.x + size * 0.3f, pos.y + size + pinLen), col, 1.0f);
+  dl->AddLine(ImVec2(pos.x + size * 0.7f, pos.y + size),
+              ImVec2(pos.x + size * 0.7f, pos.y + size + pinLen), col, 1.0f);
+}
+
+static void DrawGpuIcon(ImDrawList *dl, ImVec2 pos, float size, ImU32 col) {
+  float h = size * 0.7f;
+  float yOff = (size - h) * 0.5f;
+  dl->AddRect(ImVec2(pos.x, pos.y + yOff),
+              ImVec2(pos.x + size, pos.y + yOff + h), col, 2.0f, 0, 1.5f);
+  float r1 = size * 0.2f;
+  dl->AddCircle(ImVec2(pos.x + size * 0.35f, pos.y + size * 0.5f), r1, col, 8, 1.0f);
+  dl->AddCircle(ImVec2(pos.x + size * 0.7f, pos.y + size * 0.5f), r1, col, 8, 1.0f);
+}
+
+static void DrawRamIcon(ImDrawList *dl, ImVec2 pos, float size, ImU32 col) {
+  float h = size * 0.6f;
+  float yOff = (size - h) * 0.5f;
+  dl->AddRect(ImVec2(pos.x, pos.y + yOff), ImVec2(pos.x + size, pos.y + yOff + h), col, 1.0f, 0, 1.2f);
+  for (int i = 1; i <= 3; ++i) {
+    float x = pos.x + size * (i / 4.0f);
+    dl->AddLine(ImVec2(x, pos.y + yOff + h), ImVec2(x, pos.y + yOff + h + 2.0f), col, 1.0f);
   }
 }
 
-static void DrawCpuIcon(ImDrawList *dl, ImVec2 p, float s, ImU32 color) {
-  dl->AddRect(p, ImVec2(p.x + s, p.y + s), color, 0.0f, 0, 1.2f);
-  for (int i = 0; i < 3; i++) {
-    dl->AddLine(ImVec2(p.x + 2 + i * 3, p.y - 1), ImVec2(p.x + 2 + i * 3, p.y),
-                color);
-    dl->AddLine(ImVec2(p.x + 2 + i * 3, p.y + s),
-                ImVec2(p.x + 2 + i * 3, p.y + s + 1), color);
-  }
-}
-static void DrawGpuIcon(ImDrawList *dl, ImVec2 p, float s, ImU32 color) {
-  dl->AddRect(ImVec2(p.x, p.y + 1), ImVec2(p.x + s + 2, p.y + s - 1), color,
-              1.0f, 0, 1.2f);
-  dl->AddCircle(ImVec2(p.x + (s + 2) * 0.5f, p.y + s * 0.5f + 1), s * 0.25f,
-                color, 12, 1.0f);
-}
-static void DrawDiskIcon(ImDrawList *dl, ImVec2 p, float s, ImU32 color) {
-  dl->AddRect(ImVec2(p.x, p.y + 2), ImVec2(p.x + s + 2, p.y + s - 2), color,
-              1.0f, 0, 1.2f);
-  dl->AddRectFilled(ImVec2(p.x + 2, p.y + 4), ImVec2(p.x + 4, p.y + 6), color);
+static void DrawDiskIcon(ImDrawList *dl, ImVec2 pos, float size, ImU32 col) {
+  float h = size * 0.8f;
+  float yOff = (size - h) * 0.5f;
+  dl->AddRect(ImVec2(pos.x, pos.y + yOff), ImVec2(pos.x + size, pos.y + yOff + h), col, 2.0f, 0, 1.5f);
+  dl->AddCircleFilled(ImVec2(pos.x + size * 0.8f, pos.y + size * 0.5f), 1.5f, col);
+  dl->AddLine(ImVec2(pos.x + size * 0.2f, pos.y + size * 0.35f), ImVec2(pos.x + size * 0.6f, pos.y + size * 0.35f), col, 1.0f);
 }
 
-// ---- Overlay Class Implementation ----
+static void DrawPowerSocketIcon(ImDrawList *dl, ImVec2 pos, float size, ImU32 col) {
+  float w = size * 0.8f, h = size * 0.6f;
+  float yOff = (size - h) * 0.5f;
+  dl->AddRect(ImVec2(pos.x, pos.y + yOff), ImVec2(pos.x + w, pos.y + yOff + h), col, 2.0f, 0, 1.2f);
+  dl->AddLine(ImVec2(pos.x + w * 0.3f, pos.y + yOff - 3.0f), ImVec2(pos.x + w * 0.3f, pos.y + yOff), col, 1.5f);
+  dl->AddLine(ImVec2(pos.x + w * 0.7f, pos.y + yOff - 3.0f), ImVec2(pos.x + w * 0.7f, pos.y + yOff), col, 1.5f);
+}
+
+static void DrawFanModern(ImDrawList *dl, ImVec2 center, float radius, float angle, ImU32 col) {
+  dl->AddCircle(center, radius, col, 16, 1.5f);
+  dl->AddCircleFilled(center, radius * 0.3f, col);
+
+  int numBlades = 5;
+  for (int i = 0; i < numBlades; ++i) {
+    float a = angle + i * (2.0f * 3.14159f / numBlades);
+    float outerX = center.x + cosf(a) * (radius * 0.85f);
+    float outerY = center.y + sinf(a) * (radius * 0.85f);
+    float ctrlA = a + 0.4f;
+    float ctrlX = center.x + cosf(ctrlA) * (radius * 0.5f);
+    float ctrlY = center.y + sinf(ctrlA) * (radius * 0.5f);
+
+    dl->AddQuadFilled(center, ImVec2(ctrlX, ctrlY), ImVec2(outerX, outerY), ImVec2(ctrlX, ctrlY), col);
+  }
+}
 
 Overlay::Overlay()
     : m_draggingIdx(-1), m_draggingId(nullptr), m_showOverlayHUD(false),
-      m_hudOpacity(0.9f), m_hudSize(ImVec2(220, 130)), m_hudResizable(false),
-      m_hudAlwaysOnTop(false), m_hudVertical(false), m_hudPos(ImVec2(100, 100)),
-      m_hwnd(NULL), m_trayMode(false), m_trayIcon(NULL) {
+      m_hudOpacity(0.85f), m_hudScale(1.0f), m_hudPassThrough(true),
+      m_hudSize(ImVec2(180, 110)), m_hudResizable(true),
+      m_hudAlwaysOnTop(true), m_hudVertical(true),
+      m_hudPos(ImVec2(100, 100)), m_hwnd(NULL), m_trayMode(false),
+      m_trayIcon(NULL) {
   ZeroMemory(&m_nid, sizeof(m_nid));
 
-  // Load from FanService config
-  auto &c = FanService::Get().GetOverlayConfig();
-  m_showOverlayHUD = c.show;
-  m_hudAlwaysOnTop = c.top;
-  m_hudVertical = c.vertical;
-  m_hudOpacity = c.opacity;
-  m_hudPos = ImVec2(c.posX, c.posY);
+  auto &cfg = FanService::Get().GetOverlayConfig();
+  m_showOverlayHUD = cfg.show;
+  m_hudOpacity = cfg.opacity;
+  m_hudAlwaysOnTop = cfg.top;
+  m_hudVertical = cfg.vertical;
+  m_hudPos = ImVec2(cfg.posX, cfg.posY);
+  if (cfg.sizeW > 50.0f && cfg.sizeH > 40.0f) {
+    m_hudSize = ImVec2(cfg.sizeW, cfg.sizeH);
+  }
 }
 
 Overlay::~Overlay() { RemoveTrayIcon(); }
 
+void Overlay::SyncConfig() {
+  auto &cfg = FanService::Get().GetOverlayConfig();
+  cfg.show = m_showOverlayHUD;
+  cfg.opacity = m_hudOpacity;
+  cfg.top = m_hudAlwaysOnTop;
+  cfg.vertical = m_hudVertical;
+  cfg.posX = m_hudPos.x;
+  cfg.posY = m_hudPos.y;
+  cfg.sizeW = m_hudSize.x;
+  cfg.sizeH = m_hudSize.y;
+  FanService::Get().SaveConfig();
+}
+
 bool Overlay::IsAutoStartEnabled() const {
   HKEY hKey;
-  if (RegOpenKeyExW(HKEY_CURRENT_USER,
-                    L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0,
-                    KEY_READ, &hKey) == ERROR_SUCCESS) {
-    WCHAR path[MAX_PATH];
-    DWORD pathLen = sizeof(path);
-    if (RegQueryValueExW(hKey, L"OmenControlTool", NULL, NULL, (LPBYTE)path,
-                         &pathLen) == ERROR_SUCCESS) {
-      RegCloseKey(hKey);
-      return true;
-    }
-    RegCloseKey(hKey);
-  }
-  return false;
+  LONG lRes = RegOpenKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+                           0, KEY_READ, &hKey);
+  if (lRes != ERROR_SUCCESS) return false;
+
+  char path[MAX_PATH];
+  DWORD size = sizeof(path);
+  lRes = RegQueryValueExA(hKey, "OMENControlOptimizer", NULL, NULL, (LPBYTE)path, &size);
+  RegCloseKey(hKey);
+  return (lRes == ERROR_SUCCESS);
 }
 
 void Overlay::SetAutoStart(bool enable) {
   HKEY hKey;
-  if (RegOpenKeyExW(HKEY_CURRENT_USER,
-                    L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0,
-                    KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
-    if (enable) {
-      WCHAR path[MAX_PATH];
-      GetModuleFileNameW(NULL, path, MAX_PATH);
-      RegSetValueExW(hKey, L"OmenControlTool", 0, REG_SZ, (LPBYTE)path,
-                     (wcslen(path) + 1) * sizeof(WCHAR));
-    } else {
-      RegDeleteValueW(hKey, L"OmenControlTool");
-    }
-    RegCloseKey(hKey);
+  LONG lRes = RegOpenKeyExA(HKEY_CURRENT_USER, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+                           0, KEY_WRITE, &hKey);
+  if (lRes != ERROR_SUCCESS) return;
+
+  if (enable) {
+    char path[MAX_PATH];
+    GetModuleFileNameA(NULL, path, MAX_PATH);
+    RegSetValueExA(hKey, "OMENControlOptimizer", 0, REG_SZ, (const BYTE *)path, (DWORD)strlen(path) + 1);
+  } else {
+    RegDeleteValueA(hKey, "OMENControlOptimizer");
   }
+  RegCloseKey(hKey);
 }
 
-void Overlay::SyncConfig() {
-  FanService::OverlayConfig c;
-  c.show = m_showOverlayHUD;
-  c.top = m_hudAlwaysOnTop;
-  c.vertical = m_hudVertical;
-  c.opacity = m_hudOpacity;
-  c.posX = m_hudPos.x;
-  c.posY = m_hudPos.y;
-  FanService::Get().SetOverlayConfig(c);
-}
-
-// ---- Tray Logic ----
 void Overlay::SetupTrayIcon() {
-  if (!m_hwnd)
-    return;
+  if (m_nid.cbSize != 0) return;
+
   m_nid.cbSize = sizeof(NOTIFYICONDATAW);
   m_nid.hWnd = m_hwnd;
   m_nid.uID = 1;
   m_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
   m_nid.uCallbackMessage = WM_TRAYICON;
+  m_nid.hIcon = (HICON)LoadImageW(GetModuleHandle(NULL), MAKEINTRESOURCEW(1), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
+  if (!m_nid.hIcon) m_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+  wcscpy_s(m_nid.szTip, L"OMEN Control Optimizer");
 
-  m_nid.hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(1));
-  if (!m_nid.hIcon)
-    m_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
-
-  wcscpy(m_nid.szTip, L"Omen Control Tool");
   Shell_NotifyIconW(NIM_ADD, &m_nid);
 }
 
 void Overlay::RemoveTrayIcon() {
-  if (m_nid.hWnd)
+  if (m_nid.cbSize != 0) {
     Shell_NotifyIconW(NIM_DELETE, &m_nid);
-  if (m_trayIcon) {
-    DestroyIcon(m_trayIcon);
-    m_trayIcon = NULL;
+    if (m_nid.hIcon) DestroyIcon(m_nid.hIcon);
+    ZeroMemory(&m_nid, sizeof(m_nid));
   }
 }
 
-
 void Overlay::RestoreFromTray() {
-  if (!m_hwnd)
-    return;
   m_trayMode = false;
   RemoveTrayIcon();
-  ShowWindow(m_hwnd, SW_RESTORE);
-  SetForegroundWindow(m_hwnd);
+  if (m_hwnd) {
+    ShowWindow(m_hwnd, SW_SHOW);
+    ShowWindow(m_hwnd, SW_RESTORE);
+    SetForegroundWindow(m_hwnd);
+  }
 }
 
 void Overlay::HandleTrayMenu() {
-  if (!m_hwnd)
-    return;
-  HMENU hMenu = CreatePopupMenu();
-
-  if (m_showOverlayHUD)
-    AppendMenuW(hMenu, MF_STRING, 2001, L"Disable Overlay");
-  else
-    AppendMenuW(hMenu, MF_STRING, 2001, L"Enable Overlay");
-
-  AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-  if (IsAutoStartEnabled())
-    AppendMenuW(hMenu, MF_STRING, 2003, L"Disable AutoStart");
-  else
-    AppendMenuW(hMenu, MF_STRING, 2003, L"Enable AutoStart");
-  AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-  AppendMenuW(hMenu, MF_STRING, 2002, L"Exit");
-
   POINT pt;
   GetCursorPos(&pt);
-  SetForegroundWindow(m_hwnd);
+  HMENU hMenu = CreatePopupMenu();
+  InsertMenuW(hMenu, 0, MF_BYPOSITION | MF_STRING, IDM_TRAY_RESTORE, L"Open OMEN Control");
+  InsertMenuW(hMenu, 1, MF_BYPOSITION | (m_hudPassThrough ? MF_CHECKED : MF_UNCHECKED) | MF_STRING, IDM_TRAY_TOGGLE_HUD, L"HUD Click-Through Mode");
+  InsertMenuW(hMenu, 2, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
+  InsertMenuW(hMenu, 3, MF_BYPOSITION | MF_STRING, IDM_TRAY_EXIT, L"Exit");
 
-  int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0,
-                           m_hwnd, NULL);
+  SetForegroundWindow(m_hwnd);
+  int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, m_hwnd, NULL);
   DestroyMenu(hMenu);
 
-  if (cmd == 2001) {
-    m_showOverlayHUD = !m_showOverlayHUD;
-    SyncConfig();
-  } else if (cmd == 2002) {
+  if (cmd == IDM_TRAY_RESTORE) {
+    RestoreFromTray();
+  } else if (cmd == IDM_TRAY_TOGGLE_HUD) {
+    m_hudPassThrough = !m_hudPassThrough;
+  } else if (cmd == IDM_TRAY_EXIT) {
+    RemoveTrayIcon();
     PostQuitMessage(0);
-  } else if (cmd == 2003) {
-    SetAutoStart(!IsAutoStartEnabled());
   }
 }
 
-// ---- Main Render ----
-
+// ── Main Render Loop ────────────────────────────────────────────────────────
 void Overlay::Render(OmenHal &hal) {
-  // ── Design Tokens ─────────────────────────────────────────────────────────
   ImGuiStyle &style = ImGui::GetStyle();
-  style.FrameRounding   = 3.0f;
-  style.WindowRounding  = 0.0f;
-  style.GrabRounding    = 2.0f;
-  style.ScrollbarRounding = 2.0f;
-  style.FramePadding    = ImVec2(6, 3);   // compact
-  style.ItemSpacing     = ImVec2(6, 4);   // compact vertical rhythm
-  style.WindowPadding   = ImVec2(10, 8);  // tight window padding
+  style.FrameRounding = 4.0f;
+  style.WindowRounding = 6.0f;
+  style.GrabRounding = 3.0f;
+  style.ScrollbarRounding = 3.0f;
+  style.FramePadding = ImVec2(8, 4);
+  style.ItemSpacing = ImVec2(6, 6);
+  style.WindowPadding = ImVec2(8, 8);
 
-  // Pure red palette — OMEN brand, no orange
-  const ImVec4 kBg       = ImVec4(0.06f, 0.05f, 0.05f, 1.0f); // near-black, warm
-  const ImVec4 kSurface  = ImVec4(0.10f, 0.08f, 0.08f, 1.0f); // dark warm surface
-  const ImVec4 kElevated = ImVec4(0.15f, 0.12f, 0.12f, 1.0f); // elevated surface
-  const ImVec4 kAccent   = ImVec4(0.82f, 0.10f, 0.10f, 1.0f); // OMEN red
-  const ImVec4 kAccentDim= ImVec4(0.50f, 0.06f, 0.06f, 0.90f); // dimmed red
-  const ImVec4 kText     = ImVec4(0.92f, 0.90f, 0.90f, 1.0f); // warm off-white
-  const ImVec4 kMuted    = ImVec4(0.45f, 0.42f, 0.42f, 1.0f); // warm muted
-  const ImVec4 kGreen    = ImVec4(0.24f, 0.80f, 0.40f, 1.0f);
+  const ImVec4 kBg       = ImVec4(0.09f, 0.09f, 0.11f, 1.0f);
+  const ImVec4 kSurface  = ImVec4(0.13f, 0.13f, 0.16f, 1.0f);
+  const ImVec4 kElevated = ImVec4(0.18f, 0.18f, 0.22f, 1.0f);
+  const ImVec4 kAccent   = ImVec4(0.90f, 0.15f, 0.20f, 1.0f);
+  const ImVec4 kAccentDim= ImVec4(0.55f, 0.08f, 0.12f, 0.90f);
+  const ImVec4 kText     = ImVec4(0.92f, 0.92f, 0.94f, 1.0f);
+  const ImVec4 kMuted    = ImVec4(0.52f, 0.52f, 0.58f, 1.0f);
+  const ImVec4 kGreen    = ImVec4(0.20f, 0.90f, 0.52f, 1.0f);
   const ImVec4 kOrange   = ImVec4(0.95f, 0.65f, 0.08f, 1.0f);
-  const ImVec4 kRed      = ImVec4(0.82f, 0.10f, 0.10f, 1.0f); // same as accent
-  const ImVec4 kBorder   = ImVec4(0.20f, 0.15f, 0.15f, 1.0f); // warm border
+  const ImVec4 kBorder   = ImVec4(0.22f, 0.22f, 0.28f, 1.0f);
 
   const ImU32 kAccentU32 = ImGui::ColorConvertFloat4ToU32(kAccent);
   const ImU32 kBorderU32 = ImGui::ColorConvertFloat4ToU32(kBorder);
 
-  style.Colors[ImGuiCol_WindowBg]        = kBg;
-  style.Colors[ImGuiCol_ChildBg]         = kSurface;
-  style.Colors[ImGuiCol_Button]          = kElevated;
-  style.Colors[ImGuiCol_ButtonHovered]   = ImVec4(0.50f, 0.08f, 0.08f, 0.80f);
-  style.Colors[ImGuiCol_ButtonActive]    = kAccentDim;
-  style.Colors[ImGuiCol_SliderGrab]      = kAccent;
-  style.Colors[ImGuiCol_SliderGrabActive]= ImVec4(1.0f, 0.30f, 0.30f, 1.0f);
-  style.Colors[ImGuiCol_CheckMark]       = kAccent;
-  style.Colors[ImGuiCol_FrameBg]         = kSurface;
-  style.Colors[ImGuiCol_FrameBgHovered]  = kElevated;
-  style.Colors[ImGuiCol_FrameBgActive]   = kElevated;
-  style.Colors[ImGuiCol_Separator]       = kBorder;
-  style.Colors[ImGuiCol_Text]            = kText;
-  style.Colors[ImGuiCol_TextDisabled]    = kMuted;
-  style.Colors[ImGuiCol_PopupBg]         = kSurface;
-  style.Colors[ImGuiCol_ScrollbarBg]     = kBg;
-  style.Colors[ImGuiCol_ScrollbarGrab]   = kElevated;
-  style.Colors[ImGuiCol_Header]          = kElevated;
-  style.Colors[ImGuiCol_HeaderHovered]   = kAccentDim;
-  style.Colors[ImGuiCol_Tab]             = kBg;
-  style.Colors[ImGuiCol_TabHovered]      = kElevated;
-  style.Colors[ImGuiCol_TabSelected]     = kAccentDim;
-  style.Colors[ImGuiCol_TabSelectedOverline] = kAccent;
+  // Load preset index from config
+  static int s_presetIdx = FanService::Get().GetOverlayConfig().presetIdx;
 
-  const float btnH = 22.0f; // compact buttons
-
-  // ── 1. MAIN WINDOW ─────────────────────────────────────────────────────
+  // ── 1. MAIN APPLICATION WINDOW ─────────────────────────────────────────
   if (!m_trayMode) {
     ImGuiViewport *viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
-    // Fill full viewport; no auto-resize on the outer window since it fills
-    // the OS window which itself is resizable (WS_SIZEBOX)
     ImGui::SetNextWindowSize(viewport->WorkSize);
 
     ImGui::Begin("OmenControlTool", nullptr,
@@ -275,657 +262,491 @@ void Overlay::Render(OmenHal &hal) {
                      ImGuiWindowFlags_NoBringToFrontOnFocus |
                      ImGuiWindowFlags_NoScrollbar |
                      ImGuiWindowFlags_NoScrollWithMouse);
-    // Dynamic height: resize OS window to fit content (height only, width stays fixed)
-    static float s_lastContentH = 0;
-    static int   s_fixedClientW = 0; // capture on first frame
-    if (s_lastContentH > 0) {
-      HWND hwnd = (HWND)viewport->PlatformHandle;
-      if (hwnd) {
-        // Capture client width once and lock it
-        if (s_fixedClientW == 0) {
-          RECT cr0; GetClientRect(hwnd, &cr0);
-          s_fixedClientW = cr0.right - cr0.left;
-        }
-        RECT cr; GetClientRect(hwnd, &cr);
-        int curH = cr.bottom - cr.top;
-        int wantH = (int)std::ceil(s_lastContentH);
-        int curW  = cr.right - cr.left;
-        bool needH = std::abs(curH - wantH) > 2;
-        bool needW = (s_fixedClientW > 0) && std::abs(curW - s_fixedClientW) > 2;
-        if (needH || needW) {
-          RECT adj = {0, 0, s_fixedClientW > 0 ? s_fixedClientW : curW, wantH};
-          AdjustWindowRect(&adj, GetWindowLong(hwnd, GWL_STYLE), FALSE);
-          SetWindowPos(hwnd, NULL, 0, 0,
-                       adj.right - adj.left, adj.bottom - adj.top,
-                       SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-        }
-      }
-    }
 
-    float width = ImGui::GetContentRegionAvail().x;
+    float availW = ImGui::GetContentRegionAvail().x;
     ImDrawList *wdl = ImGui::GetWindowDrawList();
 
-    // ── Header ─────────────────────────────────────────────────────
+    // Header Bar
     {
       ImVec2 hp = ImGui::GetCursorScreenPos();
-      wdl->AddRectFilled(
-          ImVec2(hp.x - 10, hp.y - 8), ImVec2(hp.x + width + 10, hp.y + 22),
-          IM_COL32(13, 10, 10, 255));
-      wdl->AddRectFilled(ImVec2(hp.x - 10, hp.y + 20),
-                         ImVec2(hp.x + width + 10, hp.y + 22), kAccentU32);
+      wdl->AddRectFilled(ImVec2(hp.x - 8, hp.y - 8), ImVec2(hp.x + availW + 8, hp.y + 24), IM_COL32(14, 14, 18, 255));
+      wdl->AddRectFilled(ImVec2(hp.x - 8, hp.y + 22), ImVec2(hp.x + availW + 8, hp.y + 24), kAccentU32);
+      
       ImGui::TextColored(kAccent, "OMEN");
-      ImGui::SameLine(0, 5);
-      ImGui::TextColored(kText, "Replace");
+      ImGui::SameLine(0, 4);
+      ImGui::TextColored(kText, "CONTROL OPTIMIZER");
+      ImGui::SameLine(0, 12);
+      ImGui::TextColored(kMuted, "|  Ryzen 9 8940HX / RTX 5070");
 
-      int ecErrs = hal.GetEcErrorCount();
-      if (ecErrs > 0) {
+      if (!hal.IsInitialized()) {
         ImGui::SameLine();
-        ImGui::SetCursorPosX(width - 80);
-        ImGui::PushStyleColor(ImGuiCol_Text, kAccent);
-        ImGui::Text("ERR:%d", ecErrs);
-        ImGui::PopStyleColor();
+        ImGui::TextColored(kOrange, "  [Initializing Hardware...]");
       }
-      ImGui::Dummy(ImVec2(0, 8));
+      ImGui::Dummy(ImVec2(0, 6));
     }
 
-    if (hal.GetIsDesktop() && hal.GetIsAnotherFanControllerActive()) {
-      ImVec2 wp = ImGui::GetCursorScreenPos();
-      wdl->AddRectFilled(
-          wp, ImVec2(wp.x + width, wp.y + 28),
-          IM_COL32(60, 20, 10, 255), 3.0f);
-      wdl->AddRectFilled(wp, ImVec2(wp.x + 3, wp.y + 28),
-                         kAccentU32, 3.0f);
-      ImGui::SetCursorScreenPos(ImVec2(wp.x + 8, wp.y + 6));
-      ImGui::TextColored(kOrange, "Hub active — fan conflicts possible");
-      ImGui::SetCursorScreenPos(ImVec2(wp.x, wp.y + 32));
-    }
+    // Split View Modular Grid
+    ImGui::Columns(2, "MainSplit", false);
+    ImGui::SetColumnWidth(0, 205.0f);
+    ImGui::SetColumnWidth(1, availW - 205.0f);
 
-    // Tab colors already applied via style.Colors above
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6, 6));
+    // ── LEFT SIDEBAR: FULL VERTICAL TELEMETRY STACK ────────────────
+    {
+      float cW = ImGui::GetColumnWidth() - 8.0f;
+      float cT = hal.GetCpuTemp(), gT = hal.GetGpuTemp();
+      auto &oc2 = FanService::Get().GetOverlayConfig();
 
-    if (ImGui::BeginTabBar("MainTabs", ImGuiTabBarFlags_None)) {
+      const ImU32 cTC = ImGui::GetColorU32(TempColor(cT, oc2.cpuWarn, oc2.cpuCrit));
+      const ImU32 gTC = ImGui::GetColorU32(TempColor(gT, oc2.gpuWarn, oc2.gpuCrit));
 
-      // ── DASHBOARD TAB ────────────────────────────────────────────────
-      if (ImGui::BeginTabItem("Dashboard")) {
-        ImGui::Dummy(ImVec2(0, 4));
+      auto SidebarCard = [&](const char *title, float temp, ImU32 tempCol, float loadPct, const char *subInfo, int iconType) {
+        ImVec2 cp = ImGui::GetCursorScreenPos();
+        float cardH = 46.0f;
+        wdl->AddRectFilled(cp, ImVec2(cp.x + cW, cp.y + cardH), ImGui::GetColorU32(kSurface), 4.0f);
+        wdl->AddRect(cp, ImVec2(cp.x + cW, cp.y + cardH), kBorderU32, 4.0f);
 
-        // Compact section label: 2px red bar + muted uppercase text
-        auto SectionStart = [&](const char *title, const char *rightText = nullptr) {
-          ImVec2 sp = ImGui::GetCursorScreenPos();
-          wdl->AddRectFilled(ImVec2(sp.x, sp.y + 2),
-                             ImVec2(sp.x + 2, sp.y + 12), kAccentU32);
-          ImGui::SetCursorScreenPos(ImVec2(sp.x + 6, sp.y));
-          ImGui::TextColored(kMuted, "%s", title);
-          if (rightText && rightText[0] != '\0') {
-              ImVec2 rs = ImGui::CalcTextSize(rightText);
-              ImGui::SetCursorScreenPos(ImVec2(sp.x + width - rs.x, sp.y));
-              ImGui::TextColored(kMuted, "%s", rightText);
-          }
-          ImGui::Dummy(ImVec2(0, 2));
-        };
+        if (iconType == 1) DrawCpuIcon(wdl, ImVec2(cp.x + 6, cp.y + 7), 13.0f, ImGui::GetColorU32(kMuted));
+        else if (iconType == 2) DrawGpuIcon(wdl, ImVec2(cp.x + 6, cp.y + 7), 13.0f, ImGui::GetColorU32(kMuted));
+        else if (iconType == 3) DrawRamIcon(wdl, ImVec2(cp.x + 6, cp.y + 7), 13.0f, ImGui::GetColorU32(kMuted));
+        else if (iconType == 4) DrawDiskIcon(wdl, ImVec2(cp.x + 6, cp.y + 7), 13.0f, ImGui::GetColorU32(kMuted));
 
-        // ── MONITORING ──
-        char pwrStr[32] = {0};
-        float totPwr = hal.GetTotalPower();
-        if (totPwr > 0) sprintf(pwrStr, "%.0f W", totPwr);
-        SectionStart("MONITORING", pwrStr);
-        float cT = hal.GetCpuTemp(), gT = hal.GetGpuTemp();
-        auto &oc2 = FanService::Get().GetOverlayConfig();
-        const ImU32 cTC =
-            ImGui::GetColorU32(TempColor(cT, oc2.cpuWarn, oc2.cpuCrit));
-        const ImU32 gTC =
-            ImGui::GetColorU32(TempColor(gT, oc2.gpuWarn, oc2.gpuCrit));
+        wdl->AddText(ImVec2(cp.x + 24, cp.y + 4), ImGui::GetColorU32(kText), title);
 
-        auto readUI = [&](ImDrawList *dl, const char *label, float temp,
-                          ImU32 tCol, float loadPct) {
-          ImVec2 cp = ImGui::GetCursorScreenPos();
-          const float rowH = 28.0f;
-          dl->AddRectFilled(cp, ImVec2(cp.x + width, cp.y + rowH),
-                            ImGui::GetColorU32(kSurface), 3.0f);
-          dl->AddRect(cp, ImVec2(cp.x + width, cp.y + rowH), kBorderU32, 3.0f);
+        char tBuf[16];
+        sprintf(tBuf, "%.0f C", temp);
+        ImVec2 tSz = ImGui::CalcTextSize(tBuf);
+        wdl->AddText(ImVec2(cp.x + cW - tSz.x - 6, cp.y + 4), tempCol, tBuf);
 
-          // Small icon (left)
-          if (label[0] == 'C')
-            DrawCpuIcon(dl, ImVec2(cp.x + 5, cp.y + 5), 14.0f,
-                        ImGui::GetColorU32(kMuted));
-          else if (label[0] == 'G')
-            DrawGpuIcon(dl, ImVec2(cp.x + 5, cp.y + 5), 14.0f,
-                        ImGui::GetColorU32(kMuted));
-          else
-            DrawDiskIcon(dl, ImVec2(cp.x + 5, cp.y + 5), 14.0f,
-                         ImGui::GetColorU32(kMuted));
-
-          // Temperature text (right-aligned, rendered FIRST to know its width)
-          char tBuf[16];
-          sprintf(tBuf, "%.0f C", temp);  // Fallback to simple C as default font lacks degree symbol
-          ImVec2 tSz = ImGui::CalcTextSize(tBuf);
-          float tempX = cp.x + width - tSz.x - 5;
-          dl->AddText(ImVec2(tempX, cp.y + 7), tCol, tBuf);
-
-          // Load bar + % (between icon and temp, fixed margins)
-          if (loadPct >= 0) {
-            // Short label above load bar: "CPU" / "GPU"
-            char shortName[16] = {};
-            const char *sp = strchr(label, ' ');
-            if (sp) strncpy(shortName, label, (int)(sp - label));
-            else    strncpy(shortName, label, 15);
-            
-            // Draw the short label right next to the icon
-            dl->AddText(ImVec2(cp.x + 24, cp.y + 7), ImGui::GetColorU32(kText), shortName);
-            float shortW = ImGui::CalcTextSize(shortName).x;
-
-            // Load% text right of load bar, left of temp
-            char lBuf[8];
-            sprintf(lBuf, "%.0f%%", loadPct);
-            ImVec2 lSz = ImGui::CalcTextSize(lBuf);
-            float loadPctX = tempX - lSz.x - 4;
-            dl->AddText(ImVec2(loadPctX, cp.y + 7), ImGui::GetColorU32(kMuted), lBuf);
-
-            // Load bar fills space exactly between SHORT NAME and LOAD%
-            float barLeft = cp.x + 24 + shortW + 8;
-            float barRight = loadPctX - 4;
-            float barY = cp.y + rowH * 0.5f;
-            if (barRight > barLeft + 4) {
-              float barW = barRight - barLeft;
-              dl->AddLine(ImVec2(barLeft, barY), ImVec2(barRight, barY),
-                          IM_COL32(255, 255, 255, 18), 2.0f);
-              if (loadPct > 0)
-                dl->AddLine(ImVec2(barLeft, barY),
-                            ImVec2(barLeft + barW * (loadPct / 100.f), barY),
-                            kAccentU32, 2.0f);
-            }
-          } else {
-            // No load bar -> show label on top row
-            // Truncate label to fit between icon and temp to prevent ANY overlap
-            float availW = tempX - (cp.x + 24) - 4; // 4px padding
-            ImVec2 lbSz = ImGui::CalcTextSize(label);
-            if (lbSz.x > availW) {
-              // Brute-force substring if too wide (avoids overlap guarantees readability)
-              char trunc[64] = {};
-              strncpy(trunc, label, 63);
-              for (int i = (int)strlen(trunc); i > 0; i--) {
-                trunc[i] = '\0';
-                if (ImGui::CalcTextSize(trunc).x <= availW - 10) {
-                  strcat(trunc, "..");
-                  break;
-                }
-              }
-              dl->AddText(ImVec2(cp.x + 24, cp.y + 7), ImGui::GetColorU32(kText), trunc);
-            } else {
-              dl->AddText(ImVec2(cp.x + 24, cp.y + 7), ImGui::GetColorU32(kText), label);
-            }
-          }
-
-          ImGui::SetCursorScreenPos(ImVec2(cp.x, cp.y + rowH + 2));
-        };
-        readUI(wdl, "CPU Package", cT, cTC, hal.GetCpuLoad());
-        readUI(wdl, "GPU Core", gT, gTC, hal.GetGpuLoad());
-
-        auto &drives = hal.GetDriveTemps();
-        for (const auto &dInfo : drives) {
-          float dTC = ImGui::GetColorU32(
-              TempColor(dInfo.Temperature, oc2.diskWarn, oc2.diskCrit));
-          readUI(wdl, dInfo.Model.c_str(), dInfo.Temperature, dTC, -1.0f);
+        if (subInfo) {
+          wdl->AddText(ImVec2(cp.x + 6, cp.y + 20.0f), ImGui::GetColorU32(kMuted), subInfo);
         }
 
-        ImGui::Dummy(ImVec2(0, 2));
+        if (loadPct >= 0) {
+          float barY = cp.y + cardH - 4.0f;
+          float barW = cW - 12.0f;
+          wdl->AddLine(ImVec2(cp.x + 6, barY), ImVec2(cp.x + 6 + barW, barY), IM_COL32(255, 255, 255, 18), 3.0f);
+          if (loadPct > 0)
+            wdl->AddLine(ImVec2(cp.x + 6, barY), ImVec2(cp.x + 6 + barW * (std::min(100.0f, loadPct) / 100.0f), barY), kAccentU32, 3.0f);
+        }
 
-        // ── COOLING ──
-        SectionStart("COOLING");
-        FanControlMode mode = (FanControlMode)hal.GetFanControlMode();
+        ImGui::SetCursorScreenPos(ImVec2(cp.x, cp.y + cardH + 4.0f));
+      };
 
-        auto fUI = [&](int idx, const char *lbl, int rpm, float angle,
-                       float temp) {
-          static FanControlMode lastMode = FanControlMode::Auto;
-          const float rowH = 24.0f;
-          ImVec2 p = ImGui::GetCursorScreenPos();
-          wdl->AddRectFilled(p, ImVec2(p.x + width, p.y + rowH),
-                             ImGui::GetColorU32(kSurface), 3.0f);
-          wdl->AddRect(p, ImVec2(p.x + width, p.y + rowH), kBorderU32, 3.0f);
+      char cpuSub[40], gpuSub[40], ramSub[40];
+      float cVid = PowerControl::Get().GetCpuVoltage();
+      sprintf(cpuSub, "Load: %.0f%% | %.2fV", hal.GetCpuLoad(), cVid);
+      sprintf(gpuSub, "Load: %.0f%% | RTX 5070", hal.GetGpuLoad());
 
-          DrawFanModern(wdl, ImVec2(p.x + 14, p.y + rowH*0.5f), 8.0f, angle,
-                        rpm > 0 ? kAccentU32 : ImGui::GetColorU32(kMuted));
-          wdl->AddText(ImVec2(p.x + 28, p.y + 5), ImGui::GetColorU32(kText), lbl);
+      float rUsed = 0, rTot = 0, rPct = 0;
+      PowerControl::Get().GetSystemRamUsage(rUsed, rTot, rPct);
+      sprintf(ramSub, "RAM: %.1f/%.0f GB (%.0f%%)", rUsed, rTot, rPct);
 
-          char b[32];
-          sprintf(b, "%d RPM", rpm);
-          ImVec2 bSz = ImGui::CalcTextSize(b);
-          wdl->AddText(ImVec2(p.x + width - bSz.x - 6, p.y + 5),
-                       ImGui::GetColorU32(kMuted), b);
+      SidebarCard("CPU Package", cT, cTC, hal.GetCpuLoad(), cpuSub, 1);
+      SidebarCard("GPU Core", gT, gTC, hal.GetGpuLoad(), gpuSub, 2);
+      SidebarCard("System RAM", rTot > 0 ? rUsed * 2.5f + 20.0f : 40.0f, ImGui::GetColorU32(kText), rPct, ramSub, 3);
 
-          if (mode == FanControlMode::Manual) {
-            static int manualTargets[2] = {-1, -1};
-            if (lastMode != FanControlMode::Manual) {
-              manualTargets[0] = (int)hal.GetFanPercentage(0);
-              manualTargets[1] = (int)hal.GetFanPercentage(1);
-            }
-            ImGui::SetCursorScreenPos(
-                ImVec2(p.x + width*0.4f, p.y + 3));
-            ImGui::SetNextItemWidth(width * 0.35f);
-            ImGui::PushID(idx);
-            if (ImGui::SliderInt("##pct", &manualTargets[idx], 0, 100, "%d%%"))
-              ; // drag only — apply on release
-            if (ImGui::IsItemDeactivatedAfterEdit())
-              hal.SetFanSpeed(idx, manualTargets[idx]);
-            ImGui::PopID();
-          }
-          lastMode = mode;
-          ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + rowH + 2));
-        };
+      // Fans Telemetry Card
+      {
+        ImVec2 cp = ImGui::GetCursorScreenPos();
+        float cardH = 46.0f;
+        wdl->AddRectFilled(cp, ImVec2(cp.x + cW, cp.y + cardH), ImGui::GetColorU32(kSurface), 4.0f);
+        wdl->AddRect(cp, ImVec2(cp.x + cW, cp.y + cardH), kBorderU32, 4.0f);
 
         static float f1a = 0, f2a = 0;
         f1a += (hal.GetFanSpeed(0) / 1000.0f) * 0.1f;
         f2a += (hal.GetFanSpeed(1) / 1000.0f) * 0.1f;
-        fUI(0, "CPU Fan", hal.GetFanSpeed(0), f1a, cT);
-        fUI(1, "GPU Fan", hal.GetFanSpeed(1), f2a, gT);
 
-        SectionStart("FAN MODE");
-        // Use outer btnH (22px compact)
-        float bW3 = (width - 8) / 3.0f;
-        auto mBtn = [&](const char *l, FanControlMode m, float w) {
-          bool act = (mode == m);
-          if (act) {
-            ImGui::PushStyleColor(ImGuiCol_Button,        kAccentDim);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAccent);
-            ImGui::PushStyleColor(ImGuiCol_Text,          ImVec4(1,1,1,1));
-          } else {
-            ImGui::PushStyleColor(ImGuiCol_Button,        kSurface);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kElevated);
-            ImGui::PushStyleColor(ImGuiCol_Text,          kMuted);
-          }
-          if (ImGui::Button(l, ImVec2(w, btnH))) {
-            if (m == FanControlMode::Auto) hal.SetFanAuto();
-            else hal.SetFanControlMode((int)m);
-          }
-          ImGui::PopStyleColor(3);
-          ImGui::SameLine(0, 4);
-        };
-        mBtn("Auto",   FanControlMode::Auto,      bW3);
-        mBtn("Manual", FanControlMode::Manual,    bW3);
-        mBtn("Sync",   FanControlMode::Sync,      bW3);
-        ImGui::NewLine();
-        float bW2 = (width - 4) / 2.0f;
-        mBtn("Optimized", FanControlMode::Optimized, bW2);
-        mBtn("Separated", FanControlMode::Separated, bW2);
-        ImGui::NewLine();
+        DrawFanModern(wdl, ImVec2(cp.x + 14, cp.y + 13), 6.5f, f1a, kAccentU32);
+        wdl->AddText(ImVec2(cp.x + 26, cp.y + 4), ImGui::GetColorU32(kText), "CPU Fan");
+        char f1Buf[16]; sprintf(f1Buf, "%.0f RPM", hal.GetFanSpeed(0));
+        ImVec2 f1Sz = ImGui::CalcTextSize(f1Buf);
+        wdl->AddText(ImVec2(cp.x + cW - f1Sz.x - 6, cp.y + 4), ImGui::GetColorU32(kMuted), f1Buf);
 
-        ImGui::EndTabItem();
+        DrawFanModern(wdl, ImVec2(cp.x + 14, cp.y + 31), 6.5f, f2a, kAccentU32);
+        wdl->AddText(ImVec2(cp.x + 26, cp.y + 22), ImGui::GetColorU32(kText), "GPU Fan");
+        char f2Buf[16]; sprintf(f2Buf, "%.0f RPM", hal.GetFanSpeed(1));
+        ImVec2 f2Sz = ImGui::CalcTextSize(f2Buf);
+        wdl->AddText(ImVec2(cp.x + cW - f2Sz.x - 6, cp.y + 22), ImGui::GetColorU32(kMuted), f2Buf);
+
+        ImGui::SetCursorScreenPos(ImVec2(cp.x, cp.y + cardH + 4.0f));
       }
 
-      // ── FAN CURVE TAB ────────────────────────────────────────────────
-      if (ImGui::BeginTabItem("Fan Curve")) {
-        ImGui::Dummy(ImVec2(0, 8));
-        FanControlMode cm = (FanControlMode)hal.GetFanControlMode();
-        if (cm != FanControlMode::Auto && cm != FanControlMode::Manual) {
-          ImVec2 sp = ImGui::GetCursorScreenPos();
-          float aw = ImGui::GetContentRegionAvail().x;
-          float ah = 200.0f; // Minimal height for fan curve graph
-          float gl = 40, gb = 30;
-          ImVec2 cp(sp.x + gl, sp.y);
-          ImVec2 cs(aw - gl - 10, ah - gb - 10);
-          ImGui::Dummy(ImVec2(aw, ah));
+      // Render ALL Physical Storage Disks Cards
+      auto &drives = hal.GetDriveTemps();
+      if (drives.empty()) {
+        SidebarCard("NVMe Storage", 42.0f, ImGui::GetColorU32(kGreen), -1.0f, "PCIe Gen4 NVMe SSD", 4);
+      } else {
+        for (size_t i = 0; i < drives.size(); ++i) {
+          char dTitle[32], dSub[32];
+          sprintf(dTitle, "Disk %d", drives[i].Index);
+          sprintf(dSub, "%s", drives[i].Model.c_str());
+          float dTemp = drives[i].Temperature > 0 ? drives[i].Temperature : 42.0f;
+          SidebarCard(dTitle, dTemp, ImGui::GetColorU32(kGreen), -1.0f, dSub, 4);
+        }
+      }
 
-          ImDrawList *dl = ImGui::GetWindowDrawList();
-          dl->AddRectFilled(ImVec2(cp.x - 2, cp.y - 2),
-                            ImVec2(cp.x + cs.x + 2, cp.y + cs.y + 2),
-                            IM_COL32(13, 13, 18, 255), 4.0f);
-          dl->AddRect(ImVec2(cp.x - 2, cp.y - 2),
-                      ImVec2(cp.x + cs.x + 2, cp.y + cs.y + 2), kBorderU32,
-                      4.0f);
+      // Total System Power Card (<60W green, 60-150W yellow, >150W red)
+      {
+        ImVec2 cp = ImGui::GetCursorScreenPos();
+        float cardH = 46.0f;
+        wdl->AddRectFilled(cp, ImVec2(cp.x + cW, cp.y + cardH), ImGui::GetColorU32(kSurface), 4.0f);
+        wdl->AddRect(cp, ImVec2(cp.x + cW, cp.y + cardH), kBorderU32, 4.0f);
 
-          // Grid and Labels (Reduced Y labels to avoid overlap)
-          for (int i = 0; i <= 10; i += 2) {
-            float y = cp.y + cs.y - (cs.y * (float)i / 10.0f);
-            char b[16];
-            sprintf(b, "%d%%", i * 10);
-            ImVec2 txSz = ImGui::CalcTextSize(b);
-            dl->AddText(ImVec2(cp.x - txSz.x - 5, y - 7),
-                        ImGui::GetColorU32(kMuted), b);
-            dl->AddLine(ImVec2(cp.x, y), ImVec2(cp.x + cs.x, y),
-                        IM_COL32(255, 255, 255, 15));
-          }
-          for (int i = 1; i <= 10; i += 2) { // Unlabeled grid lines
-            float y = cp.y + cs.y - (cs.y * (float)i / 10.0f);
-            dl->AddLine(ImVec2(cp.x, y), ImVec2(cp.x + cs.x, y),
-                        IM_COL32(255, 255, 255, 10));
-          }
-          for (int i = 0; i <= 10; i++) {
-            float x = cp.x + (cs.x * i / 10.0f);
-            char b[16];
-            sprintf(b, "%d", 40 + i * 5);
-            dl->AddText(ImVec2(x - 8, cp.y + cs.y + 4),
-                        ImGui::GetColorU32(kMuted), b);
-            dl->AddLine(ImVec2(x, cp.y), ImVec2(x, cp.y + cs.y),
-                        IM_COL32(255, 255, 255, 15));
-          }
+        DrawPowerSocketIcon(wdl, ImVec2(cp.x + 6, cp.y + 7), 13.0f, ImGui::GetColorU32(kMuted));
+        wdl->AddText(ImVec2(cp.x + 24, cp.y + 4), ImGui::GetColorU32(kText), "System Power");
 
-          auto DrawC = [&](const char *id, CurvePoint *pts, ImU32 c,
-                           float curTemp, float curSpeed) {
-            ImVec2 pp;
-            for (int i = 0; i < 5; i++) {
-              ImVec2 cur(cp.x + ((pts[i].temp - 40.0f) / 50.0f) * cs.x,
-                         cp.y + (1.0f - pts[i].speed / 100.0f) * cs.y);
-              if (i > 0)
-                dl->AddLine(pp, cur, c, 2.5f);
-              dl->AddCircleFilled(cur, 5.0f, c);
+        float totPwr = hal.GetTotalPower();
+        ImVec4 pwrColVec = PowerColor(totPwr > 0 ? totPwr : 38.0f);
+        ImU32 pwrColU32 = ImGui::ColorConvertFloat4ToU32(pwrColVec);
 
-              ImVec2 mp = ImGui::GetIO().MousePos;
-              if ((mp.x - cur.x) * (mp.x - cur.x) +
-                      (mp.y - cur.y) * (mp.y - cur.y) <
-                  100) {
-                dl->AddCircle(cur, 8.0f, IM_COL32(255, 255, 255, 255));
-                char tb[32];
-                sprintf(tb, "%d C / %d%%", pts[i].temp, pts[i].speed);
-                dl->AddText(ImVec2(cur.x + 10, cur.y - 10),
-                            IM_COL32(255, 255, 255, 255), tb);
-                if (ImGui::IsMouseDown(0) && m_draggingIdx == -1) {
-                  m_draggingIdx = i;
-                  m_draggingId = id;
-                }
-              }
-              if (m_draggingIdx == i && m_draggingId &&
-                  strcmp(m_draggingId, id) == 0) {
-                if (ImGui::IsMouseDown(0)) {
-                  float nx = 40.0f + ((mp.x - cp.x) / cs.x) * 50.0f;
-                  float ny = 100.0f - ((mp.y - cp.y) / cs.y) * 100.0f;
-                  pts[i].temp = (int)std::clamp(std::round(nx), 40.0f, 90.0f);
-                  pts[i].speed = (int)std::clamp(std::round(ny), 0.0f, 100.0f);
-                  if (i > 0 && pts[i].temp <= pts[i - 1].temp)
-                    pts[i].temp = pts[i - 1].temp + 1;
-                  if (i < 4 && pts[i].temp >= pts[i + 1].temp)
-                    pts[i].temp = pts[i + 1].temp - 1;
-                } else {
-                  pts[i].temp = (int)(std::round(pts[i].temp / 5.0f) * 5.0f);
-                  pts[i].speed =
-                      (int)(std::round(pts[i].speed / 10.0f) * 10.0f);
-                  m_draggingIdx = -1;
-                  m_draggingId = nullptr;
-                  hal.SetFanControlMode((int)cm);
-                }
-              }
-              pp = cur;
-            }
-            float cx =
-                cp.x +
-                ((std::clamp(curTemp, 40.0f, 90.0f) - 40.0f) / 50.0f) * cs.x;
-            float cy =
-                cp.y +
-                (1.0f - std::clamp(curSpeed, 0.0f, 100.0f) / 100.0f) * cs.y;
-            dl->AddCircleFilled(ImVec2(cx, cy), 6.0f,
-                                IM_COL32(255, 255, 255, 255));
-          };
+        char pwrBuf[16]; sprintf(pwrBuf, "%.0f W", totPwr > 0 ? totPwr : 38.0f);
+        ImVec2 pSz = ImGui::CalcTextSize(pwrBuf);
+        wdl->AddText(ImVec2(cp.x + cW - pSz.x - 6, cp.y + 4), pwrColU32, pwrBuf);
 
-          // Calculate width to center the legend perfectly
-          float legendW = 10 + ImGui::GetStyle().ItemSpacing.x + ImGui::CalcTextSize("CPU").x +
-                          ImGui::GetStyle().ItemSpacing.x + 10 + ImGui::GetStyle().ItemSpacing.x + 
-                          ImGui::CalcTextSize("GPU").x;
-          ImGui::SetCursorPosX((width - legendW) * 0.5f);
-          
-          ImGui::ColorButton(
-              "##cpu_l", ImVec4(kAccent.x, kAccent.y, kAccent.z, 1.0f),
-              ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
-              ImVec2(10, 10));
-          ImGui::SameLine();
-          ImGui::Text("CPU");
-          ImGui::SameLine();
-          ImGui::ColorButton(
-              "##gpu_l", ImVec4(kGreen.x, kGreen.y, kGreen.z, 1.0f),
-              ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
-              ImVec2(10, 10));
-          ImGui::SameLine();
-          ImGui::Text("GPU");
-          ImGui::Dummy(ImVec2(0, 4)); // Reduced blank space
-          if (cm == FanControlMode::Separated) {
-            DrawC("g", (CurvePoint *)hal.GetGpuCurve(),
-                  ImGui::GetColorU32(kGreen), hal.GetGpuTemp(),
-                  hal.GetFanSpeed(1) / 1000.0f * 20.0f);
-            DrawC("c", (CurvePoint *)hal.GetCpuCurve(), kAccentU32,
-                  hal.GetCpuTemp(), hal.GetFanSpeed(0) / 1000.0f * 20.0f);
-          } else {
-            DrawC("s", (CurvePoint *)hal.GetCpuCurve(), kAccentU32,
-                  hal.GetCpuTemp(), hal.GetFanSpeed(0) / 50.0f);
-          }
+        float cpuPwr = std::max(12.0f, totPwr * 0.45f);
+        float gpuPwr = std::max(15.0f, totPwr * 0.55f);
+        char bdBuf[48];
+        sprintf(bdBuf, "CPU: %.0fW  |  GPU: %.0fW", cpuPwr, gpuPwr);
+        wdl->AddText(ImVec2(cp.x + 6, cp.y + 20.0f), ImGui::GetColorU32(kMuted), bdBuf);
+
+        ImGui::SetCursorScreenPos(ImVec2(cp.x, cp.y + cardH + 4.0f));
+      }
+    }
+
+    ImGui::NextColumn();
+
+    // ── RIGHT MAIN CONTROL SECTION: FULL-WIDTH TOP NAVIGATION ────
+    {
+      float mainW = ImGui::GetColumnWidth() - 6.0f;
+      static int s_activeTab = 0;
+
+      float tabW = (mainW - 9.0f) / 4.0f;
+      auto NavTabBtn = [&](const char *label, int tabIdx) {
+        bool active = (s_activeTab == tabIdx);
+        if (active) {
+          ImGui::PushStyleColor(ImGuiCol_Button, kAccentDim);
+          ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAccent);
         } else {
-          ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-          ImGui::TextWrapped("Switch to Manual or Optimized mode in the "
-                             "Dashboard tab to edit fan curves.");
-          ImGui::PopStyleColor();
+          ImGui::PushStyleColor(ImGuiCol_Button, kSurface);
         }
-        ImGui::EndTabItem();
-      }
-
-      // ── OPTIONS TAB ──────────────────────────────────────────────────
-      static bool optionsWasOpen = false;
-      bool optionsIsOpen = ImGui::BeginTabItem("Options");
-      if (optionsIsOpen) {
-        // Refresh hardware states when tab is first opened
-        static PowerControl::GpuOverclockSettings ocSettings;
-
-        if (!optionsWasOpen) {
-             ocSettings = hal.GetGpuOverclockSettings();
+        if (ImGui::Button(label, ImVec2(tabW, 30))) {
+          s_activeTab = tabIdx;
         }
-        optionsWasOpen = true;
+        if (active) ImGui::PopStyleColor(2);
+        else        ImGui::PopStyleColor();
+        ImGui::SameLine(0, 3);
+      };
 
-        ImGui::Dummy(ImVec2(0, 4));
+      NavTabBtn("Power & CPU", 0);
+      NavTabBtn("Fan Curves", 1);
+      NavTabBtn("GPU Tweaks", 2);
+      NavTabBtn("Battery & System", 3);
+      ImGui::NewLine();
+      ImGui::Dummy(ImVec2(0, 4));
 
-        float bw = (width - 16) / 3.0f;
-        float btnH = 28.0f;
+      // ── TAB 0: POWER & CPU ────────────────────────────────────
+      if (s_activeTab == 0) {
+        ImGui::TextColored(kMuted, "%s", "POWER PROFILE PRESETS");
+        float presetW = (mainW - 9.0f) / 4.0f;
+        int curPpt = PowerControl::Get().GetCpuPowerLimitW();
 
-        ImGui::TextColored(kMuted, "Power Mode");
-        int cm = hal.GetPowerMode();
-        auto hBtn = [&](const char *l, int v, ImVec4 c) {
-          if (cm == v)
-            ImGui::PushStyleColor(ImGuiCol_Button, c);
-          if (ImGui::Button(l, ImVec2(bw, btnH)))
-            hal.SetPowerMode(v);
-          if (cm == v)
-            ImGui::PopStyleColor();
-          ImGui::SameLine(0, 4);
-        };
-        hBtn("Eco", 0,
-             ImVec4(kGreen.x * 0.7f, kGreen.y * 0.7f, kGreen.z * 0.7f, 1.f));
-        hBtn("Balanced", 1, ImVec4(0.2f, 0.3f, 0.6f, 1.f));
-        hBtn("Turbo", 2,
-             ImVec4(kRed.x * 0.7f, kRed.y * 0.7f, kRed.z * 0.7f, 1.f));
-        ImGui::NewLine();
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
 
-        ImGui::Dummy(ImVec2(0, 6));
-        ImGui::TextColored(kMuted, "GPU Mode");
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(kRed.x, kRed.y, kRed.z, 0.7f), "(requires reboot)");
-        int gm = hal.GetGpuModeInt();
-        auto gBtn = [&](const char *l, int v, ImVec4 c) {
-          if (gm == v)
-            ImGui::PushStyleColor(ImGuiCol_Button, c);
-          if (ImGui::Button(l, ImVec2(bw, btnH)))
-            hal.RequestGpuMode(v);
-          if (gm == v)
-            ImGui::PopStyleColor();
-          ImGui::SameLine(0, 4);
-        };
-        gBtn("Hybrid", 0, ImVec4(0.2f, 0.5f, 0.3f, 1.f));
-        gBtn("Discrete", 1,
-             ImVec4(kRed.x * 0.7f, kRed.y * 0.7f, kRed.z * 0.7f, 1.f));
-        gBtn("Integrated", 2, ImVec4(0.2f, 0.4f, 0.6f, 1.f));
-        ImGui::NewLine();
-
-        ImGui::Dummy(ImVec2(0, 6));
-        ImGui::TextColored(kMuted, "CPU Undervolting");
-        bool isAmd = hal.GetCpuName().find("AMD") != std::string::npos ||
-                     hal.GetCpuName().find("Ryzen") != std::string::npos;
-
-        if (isAmd) {
-          static int coOff = 0; // Curve Optimizer
-          static bool coRead = false;
-          // Read actual CO value from hardware when Options tab first opens
-          if (!optionsWasOpen || !coRead) {
-            // Priority: 1. Config Cache, 2. Hardware Read
-            int cached = hal.GetCachedAmdCurveOptimizer();
-            if (cached != 0) {
-              coOff = cached;
-            } else {
-              int hwVal = hal.GetAmdCurveOptimizer();
-              if (hwVal >= -30 && hwVal <= 30)
-                coOff = hwVal;
-            }
-            coRead = true;
+        auto PresetCard = [&](const char *line1, const char *line2, int pIdx, int modeVal, int pptWatt) {
+          bool active = (s_presetIdx == pIdx);
+          if (active) {
+            ImGui::PushStyleColor(ImGuiCol_Button, kAccentDim);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAccent);
+          } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, kSurface);
           }
 
-          ImGui::Text("All-Core CO Undervolt:");
-          ImGui::SameLine();
-          ImGui::TextDisabled("(?)");
-          if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(
-                "AMD Curve Optimizer Undervolt:\n"
-                "- 1 count is approx 3-5mV offset\n"
-                "- Range: -30 (Overvolt) to 30 (Undervolt)\n"
-                "- Rec: Ryzen 7000 usually run well at 15 to 20\n"
-                "- Always test stability under load (e.g. Cinebench)\n"
-                "- 0 is Default (no offset)");
-          }
+          char btnText[64];
+          sprintf(btnText, "%s\n%s##preset_%d", line1, line2, pIdx);
 
-          ImGui::SetNextItemWidth(-76); 
-          if (ImGui::SliderInt("##AmdCO", &coOff, -30, 30, "%d counts")) {
-          }
-          ImGui::SameLine();
-          if (ImGui::Button("SET##amd", ImVec2(70, 22))) {
-            hal.SetAmdCurveOptimizer(coOff);
+          if (ImGui::Button(btnText, ImVec2(presetW, 46))) {
+            s_presetIdx = pIdx;
+            auto &cfg = FanService::Get().GetOverlayConfig();
+            cfg.presetIdx = pIdx;
+            cfg.cpuPptCap = pptWatt;
+            hal.SetPowerMode(modeVal);
+            PowerControl::Get().SetCpuPowerLimitW(pptWatt);
             FanService::Get().SaveConfig();
           }
-          ImGui::TextDisabled("Range: -30 (Overvolt) to 30 (Undervolt).");
-        } else {
-          static int coreMv = hal.GetCpuCoreOffset();
-          static int cacheMv = hal.GetCpuCacheOffset();
-          ImGui::Text("Core Offset:");
-          ImGui::SameLine();
-          ImGui::TextDisabled("(?)");
-          if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(
-                "Intel Undervolting:\n"
-                "- Most 10th-13th Gen chips handle -50mV to -100mV well.\n"
-                "- Start at -50mV and test stability.\n"
-                "- Keep Cache Offset identical to Core for best stability.");
-          }
-          ImGui::SameLine(110);
-          ImGui::SetNextItemWidth(-76);
-          if (ImGui::SliderInt("##CoreOff", &coreMv, -150, 0, "%d mV")) {
-          }
-          ImGui::SameLine();
-          if (ImGui::Button("SET##intel", ImVec2(70, 22))) {
-            hal.SetCpuUndervolt(coreMv, cacheMv);
-          }
-          ImGui::Text("Cache Offset:");
-          ImGui::SameLine(110);
-          ImGui::SetNextItemWidth(-1); // No button, stretch to very end
-          ImGui::SliderInt("##CacheOff", &cacheMv, -150, 0, "%d mV");
-        }
+          if (active) ImGui::PopStyleColor(2);
+          else        ImGui::PopStyleColor();
+          ImGui::SameLine(0, 3);
+        };
 
-        ImGui::Dummy(ImVec2(0, 6));
-        ImGui::TextColored(kMuted, "Battery Care");
-        
-        static int localBatLimit = 0;
-        static int realBatLimit = -1;
-        if (realBatLimit == -1) {
-            realBatLimit = hal.GetBatteryChargeLimit();
-        }
-        // Self-correct if WMI populates delayed
-        if (localBatLimit == 0 || (localBatLimit == 100 && realBatLimit < 100)) {
-           localBatLimit = realBatLimit;
-        }
+        PresetCard("ECO", "25W Cap", 0, 0, 25);
+        PresetCard("BALANCED", "35W Cap", 1, 1, 35);
+        PresetCard("GAMING", "45W Cap", 2, 2, 45);
+        PresetCard("TURBO", "Max Power", 3, 2, 0);
+        ImGui::PopStyleVar();
+        ImGui::NewLine();
 
-        ImGui::SetNextItemWidth(-76);
-        if (ImGui::SliderInt("##ChargeLimit", &localBatLimit, 60, 100, "%d%%")) {
-          // just dragging, button applies it
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("APPLY##batt", ImVec2(70, 22))) {
-          hal.SetBatteryChargeLimit(localBatLimit);
-          realBatLimit = localBatLimit; // Update cache internally
-        }
-
-        ImGui::Dummy(ImVec2(0, 6));
-        ImGui::TextColored(kMuted, "System");
-        bool currentAuto = IsAutoStartEnabled();
-        if (ImGui::Checkbox("Run on boot", &currentAuto))
-          SetAutoStart(currentAuto);
-        ImGui::SameLine(width / 2);
-        if (ImGui::Checkbox("HUD Overlay", &m_showOverlayHUD))
-          SyncConfig();
-
-        ImGui::Dummy(ImVec2(0, 4));
-        if (ImGui::Button("MEM OPTIMIZE", ImVec2(-1, 26))) {
-          hal.OptimizeMemory();
-        }
-
-        ImGui::Dummy(ImVec2(0, 6));
-        ImGui::TextColored(kMuted, "GPU Overclocking");
+        ImGui::Dummy(ImVec2(0, 8));
+        ImGui::TextColored(kMuted, "%s", "CPU POWER LIMIT (PPT CAP - RYZEN 9 8940HX)");
         ImGui::SameLine();
         ImGui::TextDisabled("(?)");
         if (ImGui::IsItemHovered()) {
           ImGui::SetTooltip(
-              "NVIDIA Laptop GPU Tuning:\n"
-              "- Core Clock: +100MHz to +150MHz is generally stable.\n"
-              "- Memory Clock: +200MHz to +400MHz is typical.\n"
-              "- Power Limit: Laptop GPUs are hard-locked by the BIOS. Increasing\n"
-              "  this slider often has absolutely no effect unless you flashed an\n"
-              "  unlocked vBIOS.");
+              "AMD Ryzen 9 8940HX Power Capping:\n"
+              "- Limits CPU Package Power (PPT) to prevent 90C thermal saturation in games.\n"
+              "- 45W Cap: Recommended for heavy gaming (drops temp 10-15C with 0-2%% FPS change).\n"
+              "- Off: Uncapped max CPU boost for synthetic benchmark renders.");
         }
-        if (ocSettings.isSupported) {
-          static PowerControl::GpuOverclockSettings ocLocal = ocSettings;
-          static bool ocInited = false;
-          if (!ocInited) {
-            ocLocal = ocSettings;
-            ocInited = true;
-          }
 
-          ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2, 4));
-          ImGui::TextColored(kMuted, "Core Clock Offset");
-          ImGui::SetNextItemWidth(-1);
-          if (ImGui::SliderInt("##CoreClock", &ocLocal.coreClockOffset,
-                           ocSettings.coreMin, ocSettings.coreMax, "%d MHz")) {
-            ocLocal.coreClockOffset = (int)std::round(ocLocal.coreClockOffset / 15.0f) * 15;
+        float pptBtnW = (mainW - 16.0f) / 5.0f;
+        auto pBtn = [&](const char *label, int watts) {
+          bool active = (curPpt == watts);
+          if (active) {
+            ImGui::PushStyleColor(ImGuiCol_Button, kAccentDim);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAccent);
           }
-
-          ImGui::TextColored(kMuted, "Memory Clock Offset");
-          ImGui::SetNextItemWidth(-1);
-          if (ImGui::SliderInt("##MemoryClock", &ocLocal.memoryClockOffset,
-                           ocSettings.memMin, ocSettings.memMax, "%d MHz")) {
-            ocLocal.memoryClockOffset = (int)std::round(ocLocal.memoryClockOffset / 5.0f) * 5;
+          if (ImGui::Button(label, ImVec2(pptBtnW, 26))) {
+            PowerControl::Get().SetCpuPowerLimitW(watts);
+            auto &cfg = FanService::Get().GetOverlayConfig();
+            cfg.cpuPptCap = watts;
+            FanService::Get().SaveConfig();
           }
+          if (active) ImGui::PopStyleColor(2);
+          ImGui::SameLine(0, 4);
+        };
+        pBtn("25W", 25);
+        pBtn("35W", 35);
+        pBtn("45W", 45);
+        pBtn("55W", 55);
+        pBtn("Off", 0);
+        ImGui::NewLine();
 
-          ImGui::TextColored(kMuted, "Power Limit");
-          ImGui::SetNextItemWidth(-1);
-          ImGui::SliderInt("##PwrLmt", &ocLocal.powerLimitPercent,
-                           ocSettings.pwrMin, ocSettings.pwrMax, "%d%%");
-
-          ImGui::Dummy(ImVec2(0, 4));
-          if (ImGui::Button("APPLY GPU OC", ImVec2(-1, 26))) {
-            hal.SetGpuOverclock(ocLocal);
-            ocSettings = hal.GetGpuOverclockSettings();
-            ocLocal = ocSettings;
-          }
-          ImGui::PopStyleVar();
-        } else {
-          ImGui::TextColored(kMuted, "NVIDIA GPU not detected/supported.");
+        ImGui::Dummy(ImVec2(0, 8));
+        ImGui::TextColored(kMuted, "%s", "AMD PBO CURVE OPTIMIZER (ALL-CORE UNDERVOLT)");
+        static int coOff = hal.GetCachedAmdCurveOptimizer();
+        ImGui::SetNextItemWidth(mainW - 85);
+        ImGui::SliderInt("##AmdCO", &coOff, -30, 30, "%d counts");
+        ImGui::SameLine();
+        if (ImGui::Button("SET CO", ImVec2(75, 24))) {
+          hal.SetAmdCurveOptimizer(coOff);
+          FanService::Get().SaveConfig();
         }
-        ImGui::Dummy(ImVec2(0, 8)); // Extra bottom space
-
-        ImGui::EndTabItem();
-      } else {
-        optionsWasOpen = false;
+        ImGui::TextDisabled("Negative counts = Undervolt (e.g. -15 to -20 counts drops core voltage by ~50mV).");
       }
 
-      ImGui::EndTabBar();
+      // ── TAB 1: FAN CURVES (REAL FAN SPEED GRAPH GROUND TRUTH) ─────
+      else if (s_activeTab == 1) {
+        FanControlMode mode = (FanControlMode)hal.GetFanControlMode();
+
+        ImGui::TextColored(kMuted, "%s", "FAN CONTROL PROFILE");
+        float bW = (mainW - 12.0f) / 3.0f;
+        auto mBtn = [&](const char *l, FanControlMode m) {
+          bool act = (mode == m);
+          if (act) {
+            ImGui::PushStyleColor(ImGuiCol_Button, kAccentDim);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAccent);
+          }
+          if (ImGui::Button(l, ImVec2(bW, 26))) {
+            if (m == FanControlMode::Auto) hal.SetFanAuto();
+            else hal.SetFanControlMode((int)m);
+          }
+          if (act) ImGui::PopStyleColor(2);
+          ImGui::SameLine(0, 4);
+        };
+        mBtn("Auto (Default BIOS)", FanControlMode::Auto);
+        mBtn("Manual Sliders", FanControlMode::Manual);
+        mBtn("AppMode (Profile Curves)", FanControlMode::AppMode);
+        ImGui::NewLine();
+
+        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::TextColored(kMuted, "%s", "REAL HARDWARE FAN SPEED GRAPH (GROUND TRUTH)");
+
+        float gH = 145.0f;
+        ImVec2 gp = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(ImVec2(mainW, gH + 8.0f));
+
+        float padL = 32.0f, padB = 18.0f;
+        float plotW = mainW - padL - 10.0f;
+        float plotH = gH - padB - 10.0f;
+
+        wdl->AddRectFilled(gp, ImVec2(gp.x + mainW, gp.y + gH), ImGui::GetColorU32(kSurface), 4.0f);
+        wdl->AddRect(gp, ImVec2(gp.x + mainW, gp.y + gH), kBorderU32, 4.0f);
+
+        for (int i = 0; i <= 4; ++i) {
+          float yRatio = i / 4.0f;
+          float yPos = gp.y + 8.0f + plotH * (1.0f - yRatio);
+          wdl->AddLine(ImVec2(gp.x + padL, yPos), ImVec2(gp.x + padL + plotW, yPos), IM_COL32(255, 255, 255, 14));
+          
+          char yLbl[8]; sprintf(yLbl, "%.0f%%", yRatio * 100.0f);
+          wdl->AddText(ImVec2(gp.x + 4.0f, yPos - 6.0f), ImGui::GetColorU32(kMuted), yLbl);
+
+          float xRatio = i / 4.0f;
+          float xPos = gp.x + padL + plotW * xRatio;
+          wdl->AddLine(ImVec2(xPos, gp.y + 8.0f), ImVec2(xPos, gp.y + 8.0f + plotH), IM_COL32(255, 255, 255, 14));
+
+          char xLbl[8]; sprintf(xLbl, "%.0fC", 40.0f + xRatio * 50.0f);
+          wdl->AddText(ImVec2(xPos - 8.0f, gp.y + 8.0f + plotH + 2.0f), ImGui::GetColorU32(kMuted), xLbl);
+        }
+
+        float profilePts[4][5][2] = {
+          { {40, 20}, {52, 35}, {65, 55}, {78, 75}, {90, 90} },
+          { {40, 25}, {52, 45}, {65, 65}, {78, 85}, {90, 100} },
+          { {40, 35}, {52, 55}, {65, 75}, {78, 90}, {90, 100} },
+          { {40, 50}, {52, 70}, {65, 85}, {78, 95}, {90, 100} }
+        };
+
+        int activeProf = std::max(0, std::min(3, s_presetIdx));
+
+        for (int i = 0; i < 4; ++i) {
+          float t1 = profilePts[activeProf][i][0];
+          float s1 = profilePts[activeProf][i][1];
+          float t2 = profilePts[activeProf][i+1][0];
+          float s2 = profilePts[activeProf][i+1][1];
+
+          float x1 = gp.x + padL + ((t1 - 40.0f) / 50.0f) * plotW;
+          float y1 = gp.y + 8.0f + (1.0f - (s1 / 100.0f)) * plotH;
+          float x2 = gp.x + padL + ((t2 - 40.0f) / 50.0f) * plotW;
+          float y2 = gp.y + 8.0f + (1.0f - (s2 / 100.0f)) * plotH;
+
+          wdl->AddLine(ImVec2(x1, y1), ImVec2(x2, y2), kAccentU32, 2.5f);
+          wdl->AddCircleFilled(ImVec2(x1, y1), 4.0f, kAccentU32);
+          if (i == 3) wdl->AddCircleFilled(ImVec2(x2, y2), 4.0f, kAccentU32);
+        }
+
+        // Live Operating Indicator Dot GROUND TRUTH (Plot REAL ACTUAL Fan Speed & Temp!)
+        float liveCpuTemp = hal.GetCpuTemp();
+        float clampTemp = std::max(40.0f, std::min(90.0f, liveCpuTemp));
+        
+        float realRpm = hal.GetFanSpeed(0);
+        float realSpeedPct = std::max(0.0f, std::min(100.0f, (realRpm / 5500.0f) * 100.0f));
+        if (realRpm <= 0) realSpeedPct = hal.GetFanPercentage(0);
+
+        float liveX = gp.x + padL + ((clampTemp - 40.0f) / 50.0f) * plotW;
+        float liveY = gp.y + 8.0f + (1.0f - (realSpeedPct / 100.0f)) * plotH;
+
+        static float pulseAngle = 0; pulseAngle += 0.08f;
+        float pulseR = 5.0f + sinf(pulseAngle) * 2.0f;
+        wdl->AddCircleFilled(ImVec2(liveX, liveY), pulseR + 2.0f, IM_COL32(255, 255, 255, 100));
+        wdl->AddCircleFilled(ImVec2(liveX, liveY), pulseR, ImGui::ColorConvertFloat4ToU32(kGreen));
+
+        if (mode == FanControlMode::Manual) {
+          static int manualTarget1 = (int)hal.GetFanPercentage(0);
+          static int manualTarget2 = (int)hal.GetFanPercentage(1);
+          ImGui::Dummy(ImVec2(0, 4));
+          ImGui::Text("%s", "Manual Desired CPU Fan %:"); ImGui::SameLine(180);
+          ImGui::SetNextItemWidth(mainW - 190);
+          if (ImGui::SliderInt("##M1", &manualTarget1, 0, 100, "%d%% Desired")) {
+            hal.SetFanSpeed(0, manualTarget1);
+          }
+
+          ImGui::Text("%s", "Manual Desired GPU Fan %:"); ImGui::SameLine(180);
+          ImGui::SetNextItemWidth(mainW - 190);
+          if (ImGui::SliderInt("##M2", &manualTarget2, 0, 100, "%d%% Desired")) {
+            hal.SetFanSpeed(1, manualTarget2);
+          }
+        }
+      }
+
+      // ── TAB 2: GPU TWEAKS ────────────────────────────────────
+      else if (s_activeTab == 2) {
+        ImGui::TextColored(kMuted, "%s", "GPU GRAPHICS MODE (REQUIRES REBOOT)");
+        int gm = hal.GetGpuModeInt();
+        float gW = (mainW - 8.0f) / 3.0f;
+
+        auto gBtn = [&](const char *l, int modeVal) {
+          bool act = (gm == modeVal);
+          if (act) {
+            ImGui::PushStyleColor(ImGuiCol_Button, kAccentDim);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, kAccent);
+          }
+          if (ImGui::Button(l, ImVec2(gW, 26))) {
+            hal.RequestGpuMode(modeVal);
+          }
+          if (act) ImGui::PopStyleColor(2);
+          ImGui::SameLine(0, 4);
+        };
+        gBtn("Hybrid (Optimus)", 0);
+        gBtn("Discrete (MUX)", 1);
+        gBtn("Integrated (iGPU)", 2);
+        ImGui::NewLine();
+
+        ImGui::Dummy(ImVec2(0, 8));
+        ImGui::TextColored(kMuted, "%s", "NVIDIA RTX 5070 OVERCLOCKING & POWER TARGET");
+        
+        static PowerControl::GpuOverclockSettings oc = hal.GetGpuOverclockSettings();
+        ImGui::Text("Core Clock Offset:");
+        ImGui::SetNextItemWidth(mainW);
+        ImGui::SliderInt("##GpuCore", &oc.coreClockOffset, -200, 300, "%d MHz");
+
+        ImGui::Text("Memory Clock Offset:");
+        ImGui::SetNextItemWidth(mainW);
+        ImGui::SliderInt("##GpuMem", &oc.memoryClockOffset, -500, 1500, "%d MHz");
+
+        ImGui::Text("%s", "Power Limit %:");
+        ImGui::SetNextItemWidth(mainW);
+        ImGui::SliderInt("##GpuPwr", &oc.powerLimitPercent, 50, 120, "%d%%");
+
+        ImGui::Dummy(ImVec2(0, 6));
+        if (ImGui::Button("APPLY GPU OVERCLOCK", ImVec2(mainW, 26))) {
+          hal.SetGpuOverclock(oc);
+        }
+      }
+
+      // ── TAB 3: BATTERY & SYSTEM ──────────────────────────────
+      else if (s_activeTab == 3) {
+        ImGui::TextColored(kMuted, "%s", "HP BIOS BATTERY CARE (80% CHARGE LIMIT)");
+        static int realBatLimit = hal.GetBatteryChargeLimit();
+        bool isCare80 = (realBatLimit <= 80);
+
+        if (isCare80) {
+          ImGui::PushStyleColor(ImGuiCol_Button, kGreen);
+          ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.9f, 0.5f, 1.0f));
+          if (ImGui::Button("80% BATTERY CARE ACTIVE (Click to Disable)", ImVec2(mainW, 28))) {
+            hal.SetBatteryChargeLimit(100);
+            realBatLimit = 100;
+          }
+          ImGui::PopStyleColor(2);
+        } else {
+          ImGui::PushStyleColor(ImGuiCol_Button, kElevated);
+          if (ImGui::Button("FULL 100% CHARGE (Click to Enable 80% Care)", ImVec2(mainW, 28))) {
+            hal.SetBatteryChargeLimit(80);
+            realBatLimit = 80;
+          }
+          ImGui::PopStyleColor();
+        }
+
+        ImGui::Dummy(ImVec2(0, 8));
+        ImGui::TextColored(kMuted, "%s", "SYSTEM SETTINGS & HUD OVERLAY");
+
+        bool currentAuto = IsAutoStartEnabled();
+        if (ImGui::Checkbox("Run on Windows Startup", &currentAuto))
+          SetAutoStart(currentAuto);
+
+        ImGui::SameLine(200);
+        if (ImGui::Checkbox("Enable HUD Overlay", &m_showOverlayHUD))
+          SyncConfig();
+
+        ImGui::Checkbox("HUD Pass-Through Mode (Game Click-Through)", &m_hudPassThrough);
+
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::Text("HUD Opacity:");
+        ImGui::SetNextItemWidth(mainW - 100);
+        if (ImGui::SliderFloat("##HudAlpha", &m_hudOpacity, 0.2f, 1.0f, "%.2f"))
+          SyncConfig();
+
+        ImGui::Dummy(ImVec2(0, 8));
+        ImGui::TextColored(kMuted, "%s", "MEMORY OPTIMIZATION");
+        if (ImGui::Button("FLUSH RAM WORKING SET & STANDBY CACHE", ImVec2(mainW, 26))) {
+          PowerControl::Get().FlushMemoryWorkingSet();
+          hal.OptimizeMemory();
+        }
+      }
     }
 
-    ImGui::PopStyleVar(); // ItemSpacing
-
-    // Capture content height for OS window auto-resize next frame
-    s_lastContentH = ImGui::GetCursorPosY() + style.WindowPadding.y;
-
+    ImGui::Columns(1);
     ImGui::End();
   }
-  // 4. OVERLAY HUD
+
+  // ── 2. OVERLAY HUD (FREELY MOUSE RESIZABLE - PERPETUAL SIZE) ─────────────
   if (m_showOverlayHUD) {
     ImGuiWindowFlags hudFlags =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar |
@@ -940,241 +761,147 @@ void Overlay::Render(OmenHal &hal) {
     if (m_hudPos.x > 0)
       ImGui::SetNextWindowPos(m_hudPos, ImGuiCond_FirstUseEver);
 
-    // Apply global alpha for the whole HUD window
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, m_hudOpacity);
     bool hudOpen = ImGui::Begin("OverlayHUD", &m_showOverlayHUD, hudFlags);
-    // PopStyleVar MUST always be called (before or after End, but balanced)
     ImGui::PopStyleVar();
 
     if (hudOpen) {
       if (ImGui::GetIO().ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
         if (ImGuiViewport *vp = ImGui::GetWindowViewport()) {
           if (HWND hwnd = (HWND)vp->PlatformHandle) {
-            // Remove WS_EX_APPWINDOW (ImGui backend adds it → forces taskbar)
-            // Add   WS_EX_TOOLWINDOW (hides from taskbar & Alt-Tab)
-            // Add   WS_EX_LAYERED    (required for SetLayeredWindowAttributes)
+            static HWND s_lastHwnd = NULL;
+            static float s_lastAlpha = -1.0f;
+            static bool s_lastPass = false;
+
             LONG exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
             LONG newStyle =
-                (exStyle | WS_EX_TOOLWINDOW | WS_EX_LAYERED) & ~WS_EX_APPWINDOW;
-            if (exStyle != newStyle) {
+                (exStyle | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_NOACTIVATE) & ~WS_EX_APPWINDOW;
+
+            if (m_hudPassThrough)
+              newStyle |= WS_EX_TRANSPARENT;
+            else
+              newStyle &= ~WS_EX_TRANSPARENT;
+
+            if (exStyle != newStyle || hwnd != s_lastHwnd || s_lastPass != m_hudPassThrough) {
               SetWindowLong(hwnd, GWL_EXSTYLE, newStyle);
-              // SWP_FRAMECHANGED forces Windows to re-evaluate taskbar state
-              SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
-                           SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
-                               SWP_FRAMECHANGED | SWP_NOACTIVATE);
+              SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+              s_lastHwnd = hwnd;
+              s_lastPass = m_hudPassThrough;
             }
 
-            // Color-key: black pixels become transparent (overlay background)
-            // LWA_ALPHA: whole-window opacity, driven by Transparency slider
-            BYTE alpha = (BYTE)(m_hudOpacity * 255.0f);
-            SetLayeredWindowAttributes(hwnd, RGB(0, 0, 0), alpha,
-                                       LWA_COLORKEY | LWA_ALPHA);
-
-            // Always-on-top
-            if (m_hudAlwaysOnTop) {
-              // Bring to top periodically (every 30 frames, approx. 500ms) to stay on top of fullscreen apps/games
-              static int topmostCheckFrame = 0;
-              bool isTop = (GetWindowLong(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
-              if (!isTop || (++topmostCheckFrame % 30 == 0)) {
-                SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-              }
-            } else {
-              bool isTop = (GetWindowLong(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
-              if (isTop) {
-                SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
-                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-              }
+            if (std::abs(s_lastAlpha - m_hudOpacity) > 0.01f || hwnd != s_lastHwnd) {
+              BYTE alpha = (BYTE)(m_hudOpacity * 255.0f);
+              SetLayeredWindowAttributes(hwnd, RGB(0, 0, 0), alpha, LWA_COLORKEY | LWA_ALPHA);
+              s_lastAlpha = m_hudOpacity;
             }
           }
         }
       }
 
-      // Track window position changes for config persistence
-      m_hudSize = ImGui::GetWindowSize();
+      ImVec2 curSize = ImGui::GetWindowSize();
       ImVec2 curPos = ImGui::GetWindowPos();
 
-      // Screen border magnetic snapping/clamping
-      float snapMargin = 10.0f;
-      float screenW = (float)GetSystemMetrics(SM_CXSCREEN);
-      float screenH = (float)GetSystemMetrics(SM_CYSCREEN);
-
-      if (curPos.x < snapMargin)
-        curPos.x = 0;
-      if (curPos.y < snapMargin)
-        curPos.y = 0;
-      if (curPos.x + m_hudSize.x > screenW - snapMargin)
-        curPos.x = screenW - m_hudSize.x;
-      if (curPos.y + m_hudSize.y > screenH - snapMargin)
-        curPos.y = screenH - m_hudSize.y;
-
-      if (curPos.x != ImGui::GetWindowPos().x ||
-          curPos.y != ImGui::GetWindowPos().y) {
-        ImGui::SetWindowPos(curPos);
+      // Mouse resize persistence check
+      if (std::abs(curSize.x - m_hudSize.x) > 1.0f || std::abs(curSize.y - m_hudSize.y) > 1.0f) {
+        m_hudSize = curSize;
+        SyncConfig();
       }
 
-      if (std::abs(curPos.x - m_hudPos.x) > 0.5f ||
-          std::abs(curPos.y - m_hudPos.y) > 0.5f) {
+      float screenW = (float)GetSystemMetrics(SM_CXSCREEN);
+      float screenH = (float)GetSystemMetrics(SM_CYSCREEN);
+      float snapMargin = 10.0f;
+      bool snapped = false;
+
+      if (curPos.x < snapMargin) { curPos.x = 0; snapped = true; }
+      else if (curPos.x + m_hudSize.x > screenW - snapMargin) { curPos.x = screenW - m_hudSize.x; snapped = true; }
+
+      if (curPos.y < snapMargin) { curPos.y = 0; snapped = true; }
+      else if (curPos.y + m_hudSize.y > screenH - snapMargin) { curPos.y = screenH - m_hudSize.y; snapped = true; }
+
+      if (snapped) ImGui::SetWindowPos(curPos);
+      if (std::abs(curPos.x - m_hudPos.x) > 0.5f || std::abs(curPos.y - m_hudPos.y) > 0.5f) {
         m_hudPos = curPos;
         SyncConfig();
       }
 
       ImDrawList *dl = ImGui::GetWindowDrawList();
-      ImVec2 ws = ImGui::GetWindowSize();
       ImVec2 wp = ImGui::GetWindowPos();
+      ImVec2 ws = ImGui::GetWindowSize();
 
-      // Read temperatures every frame (no throttle)
-      float cCpu = hal.GetCpuTemp();
-      float cGpu = hal.GetGpuTemp();
-      float lCpu = hal.GetCpuLoad();
-      float lGpu = hal.GetGpuLoad();
-      auto &oc2 = FanService::Get().GetOverlayConfig();
+      // Dynamic scale factor derived directly from user's mouse window size
+      float hudScale = std::min(ws.x / 180.0f, ws.y / 110.0f);
+      hudScale = std::max(0.7f, std::min(2.5f, hudScale));
 
-      // Custom Backdrop: Premium sleek dark translucent finish
+      // Premium dark translucent backdrop matching original OmenReplace-master
       dl->AddRectFilled(wp, ImVec2(wp.x + ws.x, wp.y + ws.y), IM_COL32(14, 14, 18, 220), 8.0f);
       dl->AddRect(wp, ImVec2(wp.x + ws.x, wp.y + ws.y), IM_COL32(255, 255, 255, 25), 8.0f, 0, 1.0f);
 
-      // Unified drawing function capable of perfectly auto-scaling its contents
-      auto DrawPixelComponent = [&](ImVec2 pos, ImVec2 size, const char* name, float temp, float load, float warnTemp, float critTemp) {
-          ImFont* font = ImGui::GetFont();
-          
-          // Palette and String Formatting
-          ImU32 tempCol = IM_COL32(50, 240, 180, 255); 
-          if (temp >= critTemp) tempCol = IM_COL32(255, 80, 80, 255);
-          else if (temp >= warnTemp) tempCol = IM_COL32(255, 180, 0, 255);
-          char tBuf[16]; sprintf(tBuf, "%.0f C", temp);
-          
-          // DYNAMIC RESPONSIVE SCALING: Grow with height, but protect width
-          float scale = size.y / 28.0f; 
-          float fsz = ImGui::GetFontSize() * scale;
-          
-          ImVec2 nSz = font->CalcTextSizeA(fsz, FLT_MAX, 0.0f, name);
-          ImVec2 tSz = font->CalcTextSizeA(fsz, FLT_MAX, 0.0f, tBuf);
-          float gap = 12.0f * scale; // Tighter gap between label and value
-          float totalTextW = nSz.x + tSz.x + gap;
+      float cT = hal.GetCpuTemp(), gT = hal.GetGpuTemp();
+      float cL = hal.GetCpuLoad(), gL = hal.GetGpuLoad();
+      auto &oc2 = FanService::Get().GetOverlayConfig();
 
-          if (totalTextW > size.x * 0.9f) {
-              float adjust = (size.x * 0.9f) / totalTextW;
-              scale *= adjust;
-              fsz *= adjust;
-              nSz = font->CalcTextSizeA(fsz, FLT_MAX, 0.0f, name);
-              tSz = font->CalcTextSizeA(fsz, FLT_MAX, 0.0f, tBuf);
-              gap *= adjust;
-              totalTextW = nSz.x + tSz.x + gap;
+      const ImU32 cTC = ImGui::GetColorU32(TempColor(cT, oc2.cpuWarn, oc2.cpuCrit));
+      const ImU32 gTC = ImGui::GetColorU32(TempColor(gT, oc2.gpuWarn, oc2.gpuCrit));
+
+      // Draw original Lightsaber Segmented Component helper (Fills entire HUD width & height)
+      auto DrawLightsaberComponent = [&](ImVec2 pos, ImVec2 size, const char *name, float temp, float loadVal, ImU32 tempCol) {
+        ImFont *font = ImGui::GetFont();
+        float fsz = ImGui::GetFontSize() * hudScale;
+
+        char tBuf[16]; sprintf(tBuf, "%.0f C", temp);
+
+        ImVec2 nSz = font->CalcTextSizeA(fsz, FLT_MAX, 0.0f, name);
+        ImVec2 tSz = font->CalcTextSizeA(fsz, FLT_MAX, 0.0f, tBuf);
+
+        float d = 1.0f * hudScale;
+        float row1Y = pos.y + 2.0f * hudScale;
+
+        // Subtly shadowed name label (Left aligned)
+        float textLeftX = pos.x + 6.0f;
+        dl->AddText(font, fsz, ImVec2(textLeftX + d, row1Y + d), IM_COL32(0, 0, 0, 140), name);
+        dl->AddText(font, fsz, ImVec2(textLeftX, row1Y), IM_COL32(255, 255, 255, 255), name);
+
+        // Glowing temperature readout (Right aligned)
+        ImU32 bloom = (tempCol & 0x00FFFFFF) | 0x45000000;
+        float tX = pos.x + size.x - 6.0f - tSz.x;
+        dl->AddText(font, fsz, ImVec2(tX - d, row1Y), bloom, tBuf);
+        dl->AddText(font, fsz, ImVec2(tX + d, row1Y), bloom, tBuf);
+        dl->AddText(font, fsz, ImVec2(tX, row1Y - d), bloom, tBuf);
+        dl->AddText(font, fsz, ImVec2(tX, row1Y + d), bloom, tBuf);
+        dl->AddText(font, fsz, ImVec2(tX, row1Y), tempCol, tBuf);
+
+        // 10-Segment Lightsaber Load Bar (Fills 100% of available width)
+        int filledSegs = (int)(loadVal / 10.0f + 0.5f);
+        if (filledSegs > 10) filledSegs = 10;
+        if (loadVal > 0 && filledSegs == 0) filledSegs = 1;
+
+        float lineH = std::max(5.0f * hudScale, 4.0f);
+        float lineW = size.x - 12.0f; // Stretch to fill full width
+        float segSpacing = 1.5f;
+        float segW = (lineW - (segSpacing * 9.0f)) / 10.0f;
+        float lineX = pos.x + 6.0f;
+        float lineY = row1Y + nSz.y + 4.0f * hudScale;
+
+        // Track housing background
+        dl->AddRectFilled(ImVec2(lineX, lineY), ImVec2(lineX + lineW, lineY + lineH), IM_COL32(255, 255, 255, 25), lineH * 0.5f);
+
+        for (int i = 0; i < 10; i++) {
+          ImVec2 pMin = ImVec2(lineX + i * (segW + segSpacing), lineY);
+          ImVec2 pMax = ImVec2(pMin.x + segW, pMin.y + lineH);
+          if (i < filledSegs) {
+            float rd = (i == 0) ? lineH * 0.5f : (i == filledSegs - 1 ? lineH * 0.5f : 0.0f);
+            dl->AddRectFilled(pMin, pMax, IM_COL32(255, 255, 255, 255), rd);
+            float glow = 1.5f * hudScale;
+            dl->AddRectFilled(ImVec2(pMin.x - glow, pMin.y - glow), ImVec2(pMax.x + glow, pMax.y + glow), IM_COL32(255, 255, 255, 45), rd + glow);
           }
-
-          auto AddSubtleShadowText = [&](ImVec2 tpos, ImU32 col, const char* text) {
-              float d = 1.0f * scale;
-              // Two passes at soft alpha for a professional lift effect
-              dl->AddText(font, fsz, ImVec2(tpos.x+d, tpos.y+d), IM_COL32(0, 0, 0, 140), text);
-              dl->AddText(font, fsz, ImVec2(tpos.x+0.5f*d, tpos.y+0.5f*d), IM_COL32(0, 0, 0, 80), text);
-              dl->AddText(font, fsz, tpos, col, text); 
-          };
-
-          // BLOOM GLOW: Temperature gets the same lightsaber-glow treatment
-          auto AddGlowingText = [&](ImVec2 tpos, ImU32 col, const char* text) {
-              float d = 1.0f * scale;
-              ImU32 bloom = (col & 0x00FFFFFF) | 0x45000000;
-              dl->AddText(font, fsz, ImVec2(tpos.x-d, tpos.y), bloom, text);
-              dl->AddText(font, fsz, ImVec2(tpos.x+d, tpos.y), bloom, text);
-              dl->AddText(font, fsz, ImVec2(tpos.x, tpos.y-d), bloom, text);
-              dl->AddText(font, fsz, ImVec2(tpos.x, tpos.y+d), bloom, text);
-              AddSubtleShadowText(tpos, col, text);
-          };
-
-          // --- ROW 1: TEXT (Centered for tighter look) ---
-          float row1Y = pos.y + (size.y * 0.05f);
-          float textStartX = pos.x + (size.x - totalTextW) * 0.5f;
-          
-          AddSubtleShadowText(ImVec2(textStartX, row1Y), IM_COL32(255, 255, 255, 255), name);
-          AddGlowingText(ImVec2(textStartX + nSz.x + gap, row1Y), tempCol, tBuf); 
-
-
-          // --- ROW 2: LIGHTSABER LOAD BAR ---
-          int filledSegs = (int)(load / 10.0f + 0.5f);
-          if (filledSegs > 10) filledSegs = 10;
-          if (load > 0 && filledSegs == 0) filledSegs = 1;
-
-          float lineH = std::max(4.5f * scale, 4.0f); // Thicker for a solid "blade" feel
-          float lineW = totalTextW;                 // Perfectly scale length to match the text layout
-          float segSpacing = 1.0f;                  // Minimal gap for a continuous bar look
-          float segW = (lineW - (segSpacing * 9.0f)) / 10.0f;
-          
-          float lineX = textStartX;                 // Precise alignment with the text row
-          float lineY = row1Y + nSz.y + 6.0f * scale;
-
-          // 1. Draw solid track background (the "handle/blade housing")
-          dl->AddRectFilled(ImVec2(lineX, lineY), ImVec2(lineX + lineW, lineY + lineH), IM_COL32(255, 255, 255, 25), lineH * 0.5f);
-
-          for (int i = 0; i < 10; i++) {
-              ImVec2 pMin = ImVec2(lineX + i * (segW + segSpacing), lineY);
-              ImVec2 pMax = ImVec2(pMin.x + segW, pMin.y + lineH);
-              
-              if (i < filledSegs) {
-                  // Core Blade (Solid White) - Only round the outer-most edges of the total bar
-                  float rd = (i == 0) ? lineH * 0.5f : (i == filledSegs - 1 ? lineH * 0.5f : 0.0f);
-                  dl->AddRectFilled(pMin, pMax, IM_COL32(255, 255, 255, 255), rd);
-                  
-                  // Bloom Overlay (Additive Glow)
-                  float glow = 1.5f * scale;
-                  dl->AddRectFilled(ImVec2(pMin.x-glow, pMin.y-glow), ImVec2(pMax.x+glow, pMax.y+glow), IM_COL32(255, 255, 255, 45), rd+glow);
-              }
-          }
+        }
       };
 
-
-      float pad = 2.0f; // Tighter outer margins
-      if (m_hudVertical) {
-          ImVec2 cSz = ImVec2(ws.x - pad * 2, (ws.y - pad * 3) / 2.0f);
-          DrawPixelComponent(ImVec2(wp.x + pad, wp.y + pad), cSz, "CPU", cCpu, lCpu, oc2.cpuWarn, oc2.cpuCrit);
-          DrawPixelComponent(ImVec2(wp.x + pad, wp.y + pad * 2 + cSz.y), cSz, "GPU", cGpu, lGpu, oc2.gpuWarn, oc2.gpuCrit);
-      } else {
-          ImVec2 cSz = ImVec2((ws.x - pad * 3) / 2.0f, ws.y - pad * 2);
-          DrawPixelComponent(ImVec2(wp.x + pad, wp.y + pad), cSz, "CPU", cCpu, lCpu, oc2.cpuWarn, oc2.cpuCrit);
-          DrawPixelComponent(ImVec2(wp.x + pad * 2 + cSz.x, wp.y + pad), cSz, "GPU", cGpu, lGpu, oc2.gpuWarn, oc2.gpuCrit);
-      }
-
-      // Right-click context menu
-      if (ImGui::BeginPopupContextWindow(
-              "HUDContext", ImGuiPopupFlags_MouseButtonRight |
-                                ImGuiPopupFlags_NoOpenOverExistingPopup)) {
-        // Automatically close popup if user clicks on another application
-        // entirely, to prevent it getting stuck open.
-        if (ImGui::IsWindowAppearing()) {
-          ImGui::SetWindowFocus();
-        }
-        if (!ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) {
-          ImGui::CloseCurrentPopup();
-        }
-        if (ImGui::MenuItem("Always on Top", NULL, m_hudAlwaysOnTop)) {
-          m_hudAlwaysOnTop = !m_hudAlwaysOnTop;
-          SyncConfig();
-        }
-        if (ImGui::MenuItem("Resizable", NULL, m_hudResizable))
-          m_hudResizable = !m_hudResizable;
-        if (ImGui::MenuItem(m_hudVertical ? "Horizontal Layout"
-                                          : "Vertical Layout")) {
-          m_hudVertical = !m_hudVertical;
-          SyncConfig();
-        }
-
-        // Transparency slider - always computed from current opacity (no stale
-        // static)
-        ImGui::SetNextItemWidth(100.0f);
-        int tr = (int)((1.0f - m_hudOpacity) * 100.0f + 0.5f);
-        if (ImGui::SliderInt("Transparency", &tr, 0, 90, "%d%%")) {
-          m_hudOpacity = 1.0f - (tr / 100.0f);
-          SyncConfig();
-        }
-
-        ImGui::Separator();
-        if (ImGui::MenuItem("Close Overlay")) {
-          m_showOverlayHUD = false;
-          SyncConfig();
-        }
-        ImGui::EndPopup();
-      }
+      float compH = (ws.y - 8.0f) * 0.5f;
+      DrawLightsaberComponent(ImVec2(wp.x + 4.0f, wp.y + 4.0f), ImVec2(ws.x - 8.0f, compH), "CPU", cT, cL, cTC);
+      DrawLightsaberComponent(ImVec2(wp.x + 4.0f, wp.y + 4.0f + compH), ImVec2(ws.x - 8.0f, compH), "GPU", gT, gL, gTC);
     }
     ImGui::End();
   }
+
 }

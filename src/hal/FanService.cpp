@@ -56,15 +56,18 @@ void FanService::SaveConfig() {
     << ",\n";
   f << "  \"optimized_gpu_offset\": " << m_optimizedGpuOffset << ",\n";
 
-  // Overlay Settings
+  // Overlay & Application Settings
   f << "  \"overlay\": {\n";
   f << "    \"show\": " << (m_overlayConfig.show ? "true" : "false") << ",\n";
   f << "    \"top\": " << (m_overlayConfig.top ? "true" : "false") << ",\n";
-  f << "    \"vertical\": " << (m_overlayConfig.vertical ? "true" : "false")
-    << ",\n";
+  f << "    \"vertical\": " << (m_overlayConfig.vertical ? "true" : "false") << ",\n";
   f << "    \"opacity\": " << m_overlayConfig.opacity << ",\n";
   f << "    \"pos_x\": " << m_overlayConfig.posX << ",\n";
   f << "    \"pos_y\": " << m_overlayConfig.posY << ",\n";
+  f << "    \"size_w\": " << m_overlayConfig.sizeW << ",\n";
+  f << "    \"size_h\": " << m_overlayConfig.sizeH << ",\n";
+  f << "    \"preset_idx\": " << m_overlayConfig.presetIdx << ",\n";
+  f << "    \"cpu_ppt_cap\": " << PowerControl::Get().GetCpuPowerLimitW() << ",\n";
   f << "    \"cpu_warn\": " << m_overlayConfig.cpuWarn << ",\n";
   f << "    \"cpu_crit\": " << m_overlayConfig.cpuCrit << ",\n";
   f << "    \"gpu_warn\": " << m_overlayConfig.gpuWarn << ",\n";
@@ -73,18 +76,7 @@ void FanService::SaveConfig() {
   f << "    \"disk_crit\": " << m_overlayConfig.diskCrit << ",\n";
   f << "    \"battery_limit\": " << m_overlayConfig.batteryLimit << ",\n";
   f << "    \"amd_curve_optimizer\": " << PowerControl::Get().GetCachedAmdCurveOptimizer() << "\n";
-  f << "  },\n";
-
-  auto writeCurve = [&](const char *name, CurvePoint *pts) {
-    f << "  \"" << name << "\": [\n";
-    for (int i = 0; i < 5; i++) {
-      f << "    {\"t\":" << pts[i].temp << ",\"s\":" << pts[i].speed << "}"
-        << (i < 4 ? "," : "") << "\n";
-    }
-    f << "  ]" << (std::string(name) == "cpu_curve" ? "," : "") << "\n";
-  };
-  writeCurve("cpu_curve", m_cpuCurve);
-  writeCurve("gpu_curve", m_gpuCurve);
+  f << "  }\n";
   f << "}\n";
 }
 
@@ -92,10 +84,9 @@ void FanService::LoadConfig() {
   std::ifstream f("config.json");
   if (!f.is_open())
     return;
-  // Simple naive line-by-line parsing for our specific format
+
   std::string line;
-  int cIdx = 0, gIdx = 0;
-  bool inCpu = false, inGpu = false, inOverlay = false;
+  bool inOverlay = false;
   while (std::getline(f, line)) {
     // Read fan_mode
     if (line.find("\"fan_mode\"") != std::string::npos) {
@@ -124,7 +115,7 @@ void FanService::LoadConfig() {
           PowerControl::Get().SetMode((PowerMode)std::stoi(valStr));
       }
     }
-    // Read optimized_gpu_offset (default 20 if not present)
+    // Read optimized_gpu_offset
     if (line.find("\"optimized_gpu_offset\"") != std::string::npos) {
       size_t pos = line.find(":");
       if (pos != std::string::npos) {
@@ -135,29 +126,13 @@ void FanService::LoadConfig() {
             valStr.end());
         if (!valStr.empty()) {
           int offset = std::stoi(valStr);
-          // Clamp to reasonable range: 0-50%
           m_optimizedGpuOffset = std::max(0, std::min(50, offset));
         }
       }
     }
-    // gpu_mode is no longer loaded from config - read online only
 
     if (line.find("\"overlay\"") != std::string::npos) {
       inOverlay = true;
-      inCpu = false;
-      inGpu = false;
-      continue;
-    }
-    if (line.find("\"cpu_curve\"") != std::string::npos) {
-      inCpu = true;
-      inGpu = false;
-      inOverlay = false;
-      continue;
-    }
-    if (line.find("\"gpu_curve\"") != std::string::npos) {
-      inGpu = true;
-      inCpu = false;
-      inOverlay = false;
       continue;
     }
 
@@ -180,6 +155,7 @@ void FanService::LoadConfig() {
         m_overlayConfig.top = (line.find("true") != std::string::npos);
       if (line.find("\"vertical\"") != std::string::npos)
         m_overlayConfig.vertical = (line.find("true") != std::string::npos);
+
       auto readF = [&](const char *key, float &dst) {
         if (line.find(key) != std::string::npos) {
           try {
@@ -191,6 +167,8 @@ void FanService::LoadConfig() {
       readF("\"opacity\"", m_overlayConfig.opacity);
       readF("\"pos_x\"", m_overlayConfig.posX);
       readF("\"pos_y\"", m_overlayConfig.posY);
+      readF("\"size_w\"", m_overlayConfig.sizeW);
+      readF("\"size_h\"", m_overlayConfig.sizeH);
       readF("\"cpu_warn\"", m_overlayConfig.cpuWarn);
       readF("\"cpu_crit\"", m_overlayConfig.cpuCrit);
       readF("\"gpu_warn\"", m_overlayConfig.gpuWarn);
@@ -198,6 +176,15 @@ void FanService::LoadConfig() {
       readF("\"disk_warn\"", m_overlayConfig.diskWarn);
       readF("\"disk_crit\"", m_overlayConfig.diskCrit);
       
+      if (line.find("\"preset_idx\"") != std::string::npos) {
+        try { m_overlayConfig.presetIdx = std::stoi(getVal(line)); } catch (...) {}
+      }
+      if (line.find("\"cpu_ppt_cap\"") != std::string::npos) {
+        try {
+          m_overlayConfig.cpuPptCap = std::stoi(getVal(line));
+          PowerControl::Get().SetCpuPowerLimitW(m_overlayConfig.cpuPptCap);
+        } catch (...) {}
+      }
       if (line.find("\"battery_limit\"") != std::string::npos) {
         try { m_overlayConfig.batteryLimit = std::stoi(getVal(line)); } catch (...) {}
       }
@@ -209,22 +196,9 @@ void FanService::LoadConfig() {
         } catch (...) {}
       }
     }
-
-    if (line.find("\"t\"") != std::string::npos) {
-      int t = 40, s = 20;
-      size_t tPos = line.find("\"t\":");
-      size_t sPos = line.find("\"s\":");
-      if (tPos != std::string::npos && sPos != std::string::npos) {
-        t = std::stoi(line.substr(tPos + 4));
-        s = std::stoi(line.substr(sPos + 4));
-        if (inCpu && cIdx < 5)
-          m_cpuCurve[cIdx++] = {t, s};
-        else if (inGpu && gIdx < 5)
-          m_gpuCurve[gIdx++] = {t, s};
-      }
-    }
   }
 }
+
 
 static int MapCurve(CurvePoint *points, float temp) {
   // Current Scale is 40-90 as requested
@@ -298,21 +272,16 @@ void FanService::Update() {
 
     // Recalculate targets every 2 seconds for smooth but responsive ramping
     if (now - m_lastTargetUpdate >= 2000 || m_lastTargetUpdate == 0) {
-      if (mode == FanControlMode::Sync) {
+      if (mode == FanControlMode::AppMode) {
         float maxTemp = std::max(m_avgCpu, m_avgGpu);
-        int target = MapCurve(m_cpuCurve, maxTemp);
-        m_fan1Target = target;
-        m_fan2Target = target;
-      } else if (mode == FanControlMode::Optimized) {
         int cpuTarget = MapCurve(m_cpuCurve, m_avgCpu);
+        int gpuTarget = MapCurve(m_gpuCurve, m_avgGpu);
         m_fan1Target = cpuTarget;
-        m_fan2Target = std::max(10, cpuTarget - m_optimizedGpuOffset);
-      } else if (mode == FanControlMode::Separated) {
-        m_fan1Target = MapCurve(m_cpuCurve, m_avgCpu);
-        m_fan2Target = MapCurve(m_gpuCurve, m_avgGpu);
+        m_fan2Target = gpuTarget;
       }
       m_lastTargetUpdate = now;
     }
+
 
     // --- Heartbeat Strategy ---
     // BIOS resets WMI control every ~80s.

@@ -108,8 +108,11 @@ void ThermalService::Update() {
 
     m_cpuLoad = cpuLoad;
     m_gpuLoad = gpuLoad;
-    m_totalPower = (m_totalPower * 0.7f) + (lastRawPower * 0.3f);
+    float gpuPowerW = (gpuLoad / 100.0f) * 115.0f + (gpuLoad > 5.0f ? 12.0f : 4.0f);
+    float estimatedTotalSystemPower = lastRawPower + gpuPowerW + 12.0f; // CPU W + GPU W + System Base W
+    m_totalPower = (m_totalPower * 0.7f) + (estimatedTotalSystemPower * 0.3f);
   }
+
 
   // 3. SSD Temps (Every ~4s)
   if (m_timer % 4 == 0) {

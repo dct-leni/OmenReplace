@@ -54,6 +54,17 @@ public:
   int GetBatteryChargeLimit();
   bool SetBatteryChargeLimit(int limitPercent);
 
+  // CPU Power Limits (PPT / Sustained Power Limit in Watts for Ryzen 9 8940HX)
+  int GetCpuPowerLimitW() { return m_cpuPowerLimitW; }
+  bool SetCpuPowerLimitW(int watts);
+
+  // Memory & System Optimization
+  bool FlushMemoryWorkingSet();
+  bool GetSystemRamUsage(float &usedGb, float &totalGb, float &pct);
+  float GetCpuVoltage();
+
+
+
   bool SetFanLevelWmi(int cpuPercent, int gpuPercent); // WMI Method 0x2E
   bool SetFanLevelWmiBg(
       int cpuPercent,
@@ -69,6 +80,7 @@ private:
   int m_gpuMode = -1; // 0=Hybrid, 1=Discrete, 2=Optimus
   int m_batteryLimitPercent = 100; // Cached battery threshold (WMI only knows on/off)
   int m_amdCurveOptimizer = 0;
+  int m_cpuPowerLimitW = 0; // 0 = Uncapped/Default
 
   // WMI HP BIOS Helper
   bool CallHpBios(uint32_t cmd, uint32_t type, uint8_t *data, size_t size,

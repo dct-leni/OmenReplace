@@ -34,11 +34,14 @@ private:
   // Overlay HUD
   bool m_showOverlayHUD;
   float m_hudOpacity;
+  float m_hudScale = 1.0f;
+  bool m_hudPassThrough = true;
   ImVec2 m_hudSize;
   bool m_hudResizable;
   bool m_hudAlwaysOnTop;
   bool m_hudVertical;
   ImVec2 m_hudPos;
+
 
   // Tray
   HWND m_hwnd;

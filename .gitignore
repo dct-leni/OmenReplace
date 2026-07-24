@@ -1,20 +1,39 @@
-external_source/
-CMakeFiles/
+# Build & Output Directories
 build/
 output/
-.cache/
-.vscode/
-.agents/
-.codegraph/
+bin/
+out/
+CMakeFiles/
+external_source/
 
+# Cache & Toolchain Cache Directories
+.cache/
+.codegraph/
+.vs/
+.vscode/
+.idea/
+.agents/
+
+# CMake Generated Files
 CMakeCache.txt
 Makefile
 cmake_install.cmake
+compile_commands.json
 *.cmake
+static_pthread.specs
+
+# Binary & Object Files
 *.a
 *.lib
 *.exe
+*.dll
 *.obj
 *.o
 *.pdb
 *.ilk
+*.exp
+*.res
+
+# Logs & Diagnostics
+*.log
+*.tmp

@@ -13,8 +13,10 @@ public:
   static OmenHal &Get();
 
   bool Initialize();
+  bool IsInitialized() const { return m_initialized; }
   void Shutdown();
   void Update();
+
 
   // Getters (delegates to services)
   float GetCpuTemp();

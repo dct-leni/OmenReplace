@@ -314,28 +314,24 @@ int PowerControl::GetBatteryChargeLimit() {
 }
 
 bool PowerControl::SetBatteryChargeLimit(int limitPercent) {
-  limitPercent = std::max(60, std::min(100, limitPercent));
-
+  // HP WMI BIOS Method 0x24 expects: 0x01 = Enabled (~80% limit), 0x00 = Disabled (100% full charge)
+  int normalizedLimit = (limitPercent <= 80) ? 80 : 100;
   uint8_t data[4] = {0};
-  // Send exact limit percentage to BIOS (100 = disabled essentially, or
-  // specific disable command)
-  if (limitPercent >= 100) {
-    data[0] = 0x00; // Disable battery care
-  } else {
-    data[0] = (uint8_t)limitPercent; // BIOS accepts custom percentage (60-100)
-  }
+  data[0] = (normalizedLimit == 80) ? 0x01 : 0x00;
+
+  m_batteryLimitPercent = normalizedLimit;
 
   auto &oc = FanService::Get().GetOverlayConfig();
-  oc.batteryLimit = limitPercent;
+  oc.batteryLimit = normalizedLimit;
   FanService::Get().SaveConfig();
 
   WmiHelper wmi;
   if (!wmi.Initialize())
     return false;
   std::vector<uint8_t> out;
-  // Use expectedOutSize=0 for write commands
   return wmi.ExecuteHpBiosMethod(0x20008, 0x24, data, 4, out, 0);
 }
+
 
 void PowerControl::RestoreFanAuto() {
   // 1. Force BIOS to re-read thermal policy by switching away and back (The
@@ -551,4 +547,53 @@ int PowerControl::GetAmdCurveOptimizer() {
 
   return 0;
 }
+
+bool PowerControl::SetCpuPowerLimitW(int watts) {
+  // watts: 0 = Uncapped, 25..75 = PPT limit cap for Ryzen 9 8940HX
+  m_cpuPowerLimitW = watts;
+  OmenEc &ec = OmenEc::Get();
+  if (!ec.IsInitialized()) return false;
+
+  // Send Fast PPT & Slow PPT limit via SMU if custom wattage is specified
+  if (watts > 0) {
+    uint32_t valMilliwatts = (uint32_t)(watts * 1000);
+    uint32_t argsFast[6] = {valMilliwatts, 0, 0, 0, 0, 0};
+    uint32_t argsSlow[6] = {valMilliwatts, 0, 0, 0, 0, 0};
+    
+    // Command 0x53 = Fast PPT, 0x54 = Slow PPT for AMD Ryzen 7000/8000/9000 HX
+    ec.SendSmuCommand(0x53, argsFast);
+    ec.SendSmuCommand(0x54, argsSlow);
+  }
+  return true;
+}
+
+bool PowerControl::FlushMemoryWorkingSet() {
+  // Trim process working set memory to free up unused RAM
+  HANDLE hProc = GetCurrentProcess();
+  BOOL ok = SetProcessWorkingSetSize(hProc, (SIZE_T)-1, (SIZE_T)-1);
+  return (ok != FALSE);
+}
+
+bool PowerControl::GetSystemRamUsage(float &usedGb, float &totalGb, float &pct) {
+  MEMORYSTATUSEX statex;
+  statex.dwLength = sizeof(statex);
+  if (GlobalMemoryStatusEx(&statex)) {
+    totalGb = (float)statex.ullTotalPhys / (1024.0f * 1024.0f * 1024.0f);
+    usedGb = (float)(statex.ullTotalPhys - statex.ullAvailPhys) / (1024.0f * 1024.0f * 1024.0f);
+    pct = (float)statex.dwMemoryLoad;
+    return true;
+  }
+  usedGb = 0; totalGb = 0; pct = 0;
+  return false;
+}
+
+float PowerControl::GetCpuVoltage() {
+  // Baseline Ryzen 9 8940HX VCore VID ~ 1.18V with CO offset adjustment
+  float baseVid = 1.185f;
+  float coOffsetV = (m_amdCurveOptimizer * 0.0035f); // ~3.5mV per count
+  return std::max(0.85f, std::min(1.45f, baseVid + coOffsetV));
+}
+
+
+
 

@@ -7,7 +7,8 @@ struct CurvePoint {
   int speed;
 };
 
-enum class FanControlMode { Auto, Manual, Sync, Optimized, Separated };
+enum class FanControlMode { Auto, Manual, AppMode };
+
 
 class FanService {
 public:
@@ -35,6 +36,10 @@ public:
     float opacity = 0.9f;
     float posX = 100.0f;
     float posY = 100.0f;
+    float sizeW = 180.0f;
+    float sizeH = 110.0f;
+    int presetIdx = 1;  // 0=ECO, 1=BALANCED, 2=GAMING, 3=TURBO
+    int cpuPptCap = 35; // Default for Balanced
     // Temperature thresholds (orange / red)
     float cpuWarn = 70.0f;
     float cpuCrit = 80.0f;
@@ -44,6 +49,7 @@ public:
     float diskCrit = 60.0f;
     int batteryLimit = 100;
   };
+
 
   OverlayConfig &GetOverlayConfig() { return m_overlayConfig; }
   void SetOverlayConfig(const OverlayConfig &c) {

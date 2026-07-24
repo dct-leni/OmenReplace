@@ -2,8 +2,14 @@
 #include <iostream>
 #include <string>
 #include <tchar.h>
+#include <timeapi.h>
 #include <vector>
 #include <windows.h>
+
+#ifdef _MSC_VER
+#pragma comment(lib, "winmm.lib")
+#endif
+
 
 #include "backends/imgui_impl_dx11.h"
 #include "backends/imgui_impl_win32.h"
@@ -19,11 +25,12 @@ static ID3D11DeviceContext *g_pd3dDeviceContext = NULL;
 static IDXGISwapChain *g_pSwapChain = NULL;
 static ID3D11RenderTargetView *g_mainRenderTargetView = NULL;
 
-// Force iGPU usage to prevent dGPU wake-up (Thermal Optimization)
+// System Default GPU assignment (relies on Windows Graphics Preferences)
 extern "C" {
-__declspec(dllexport) DWORD NvOptimusEnablement = 0x00000000;
-__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 0;
+__declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
+
 
 // Global overlay pointer for WndProc access
 static Overlay *g_pOverlay = nullptr;
@@ -105,16 +112,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
                     LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(1))};
   ::RegisterClassExW(&wc);
 
-  // Compact window: fixed width, height adjusts dynamically to content
-  int WIN_W = 340;
-  int WIN_H = 560; // Initial height; ImGui sizes window to content each frame
+  // Compact Tech Modular Grid window size
+  int WIN_W = 680;
+  int WIN_H = 440;
   RECT wr = {0, 0, WIN_W, WIN_H};
   DWORD dwStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_SIZEBOX;
   AdjustWindowRect(&wr, dwStyle, FALSE);
 
+
   HWND hwnd = ::CreateWindowW(
-      wc.lpszClassName, L"Omen Control Tool", dwStyle | WS_VISIBLE, 100, 100,
+      wc.lpszClassName, L"OMEN Control Optimizer", dwStyle | WS_VISIBLE, 100, 100,
       wr.right - wr.left, wr.bottom - wr.top, NULL, NULL, wc.hInstance, NULL);
+
 
   // Initialize Direct3D
   if (!CreateDeviceD3D(hwnd)) {
@@ -166,17 +175,25 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
     style.Colors[ImGuiCol_WindowBg].w = 0.0f;
   }
 
+  // Enable 1ms timer resolution for smooth Sleep pacing
+  timeBeginPeriod(1);
+
+
+
   // Setup Platform/Renderer backends
   ImGui_ImplWin32_Init(hwnd);
   ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
-  // Initialize Omen HAL
-  if (!OmenHal::Get().Initialize()) {
-  }
+  // Initialize Omen HAL asynchronously to prevent GUI startup freeze
+  std::thread halInitThread([]() {
+    OmenHal::Get().Initialize();
+  });
+  halInitThread.detach();
 
   Overlay overlay;
   overlay.SetHwnd(hwnd);
   g_pOverlay = &overlay;
+
 
   ImVec4 clear_color = ImVec4(0.06f, 0.06f, 0.08f, 1.00f);
 
@@ -259,7 +276,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
   ::DestroyWindow(hwnd);
   ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
 
+  timeEndPeriod(1);
   return 0;
+
 }
 
 // Helper functions
@@ -283,25 +302,10 @@ bool CreateDeviceD3D(HWND hWnd) {
 
   UINT createDeviceFlags = 0;
 
-  // Explicitly find Integrated GPU (Non-NVIDIA)
-  IDXGIAdapter *pAdapter = NULL;
-  IDXGIFactory *pFactory = NULL;
-  if (CreateDXGIFactory(__uuidof(IDXGIFactory), (void **)&pFactory) == S_OK) {
-    for (UINT i = 0;
-         pFactory->EnumAdapters(i, &pAdapter) != DXGI_ERROR_NOT_FOUND; ++i) {
-      DXGI_ADAPTER_DESC desc;
-      pAdapter->GetDesc(&desc);
-      if (desc.VendorId != 0x10DE) {
-        break;
-      }
-      pAdapter->Release();
-      pAdapter = NULL;
-    }
-    pFactory->Release();
-  }
+  // System Default GPU 0 (Pass nullptr to use primary system graphics adapter)
+  IDXGIAdapter *pAdapter = nullptr;
+  D3D_DRIVER_TYPE driverType = D3D_DRIVER_TYPE_HARDWARE;
 
-  D3D_DRIVER_TYPE driverType =
-      pAdapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
 
   D3D_FEATURE_LEVEL featureLevel;
   const D3D_FEATURE_LEVEL featureLevelArray[2] = {
@@ -390,13 +394,19 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     return 0;
 
-  case WM_SYSCOMMAND:
-    if ((wParam & 0xfff0) == SC_KEYMENU)
-      return 0;
+  case WM_CLOSE:
+    if (g_pOverlay) {
+      g_pOverlay->SetTrayMode(true);
+      g_pOverlay->SetupTrayIcon();
+      ShowWindow(hWnd, SW_HIDE);
+      return 0; // Intercept close to hide in system tray
+    }
     break;
+
   case WM_DESTROY:
     ::PostQuitMessage(0);
     return 0;
+
   }
   return ::DefWindowProc(hWnd, msg, wParam, lParam);
 }
