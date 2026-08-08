@@ -3,7 +3,6 @@
 #include <cctype>
 #include <cstddef>
 #include <iostream>
-#include <fstream>
 #include <windows.h>
 #include <ntddscsi.h>
 #include <ntddstor.h>
@@ -13,10 +12,6 @@
 // Definitions for modern storage queries
 #ifndef IOCTL_STORAGE_QUERY_PROPERTY
 #define IOCTL_STORAGE_QUERY_PROPERTY 0x002D1450
-#endif
-
-#ifndef IOCTL_STORAGE_PROTOCOL_COMMAND
-#define IOCTL_STORAGE_PROTOCOL_COMMAND 0x002D1450
 #endif
 
 #pragma pack(push, 1)
@@ -51,19 +46,6 @@ struct MY_STORAGE_PROTOCOL_SPECIFIC_DATA {
     DWORD Reserved[3];
 };
 
-struct MY_STORAGE_PROTOCOL_COMMAND {
-    DWORD Version;
-    DWORD Length;
-    STORAGE_PROTOCOL_TYPE ProtocolType;
-    DWORD Flags;
-    DWORD ProtocolDataOffset;
-    DWORD ProtocolDataLength;
-    DWORD CommandSpecific;
-    DWORD Reserved0;
-    DWORD ProtocolSpecific;
-    DWORD Reserved1;
-    DWORD Reserved2[3];
-};
 #pragma pack(pop)
 
 SmartHelper::SmartHelper() {}
@@ -182,7 +164,7 @@ void SmartHelper::UpdateTemps() {
                 // swapped variants, and pick the interpretation in range.
                 float tempC = 0.0f;
                 const uint16_t variants[4] = {k, (uint16_t)((k >> 8) | (k << 8)),
-                                              (uint16_t)(k / 10), k * 10};
+                                              (uint16_t)(k / 10), (uint16_t)(k * 10)};
                 for (int vi = 0; vi < 4 && tempC == 0.0f; vi++) {
                     uint32_t v = variants[vi];
                     if (v >= 273 && v < 500) tempC = (float)v - 273.0f;

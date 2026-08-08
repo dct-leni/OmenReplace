@@ -17,6 +17,7 @@ public:
 
     void ScanDrives();
     const std::vector<DriveInfo>& GetDrives() const { return m_drives; }
+    std::vector<DriveInfo>& GetDrives() { return m_drives; }
     void UpdateTemps();
 
 private:

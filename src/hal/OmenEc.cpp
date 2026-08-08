@@ -8,20 +8,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <fstream>
-#include <iostream>
 #include <thread>
 
 void LogEc(const std::string &msg) {}
 
-#include <fstream>
-#include <iomanip>
-#include <sstream>
-
 static HANDLE s_ecMutex = NULL;
 static HANDLE s_pciMutex = NULL;
-
-
 
 OmenEc::OmenEc() {}
 OmenEc::~OmenEc() {
@@ -143,10 +135,12 @@ bool OmenEc::WaitEcOutputFull() {
   return false;
 }
 
-uint8_t OmenEc::ReadByte(uint8_t offset) {
+ uint8_t OmenEc::ReadByte(uint8_t offset) {
   for (int retry = 0; retry < 3; retry++) {
-    if (!LockEc())
+    if (!LockEc()) {
+      Sleep(1);
       continue;
+    }
     if (WaitEcInputEmpty()) {
       WritePort(0x66, 0x80);
       if (WaitEcInputEmpty()) {

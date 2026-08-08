@@ -178,9 +178,7 @@ void OmenHal::BackgroundLoop() {
     FanService::Get().Update();
 
     // Update power control less frequently (every 5 seconds)
-    // This reduces expensive WMI calls
-    // Update power control less frequently (every 10 seconds)
-    // This reduces expensive WMI calls
+    // Update power control every 10 seconds to reduce expensive WMI calls.
     if (updateCounter % 10 == 0) {
       PowerControl::Get().Update();
     }

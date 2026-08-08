@@ -42,4 +42,7 @@ private:
   bool m_draggingSlider = false; // dragging CO or opacity track
   int m_dragTrack = 0;           // 1 = CO, 2 = opacity
   int m_previewCo = 0;           // CO preview during drag (not yet applied)
+  HFONT m_boldFont = nullptr;
+  HFONT m_normFont = nullptr;
+  HFONT m_smallFont = nullptr;
 };

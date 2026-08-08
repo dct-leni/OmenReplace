@@ -59,14 +59,15 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showMode) {
 
   timeBeginPeriod(1);
 
-  // Load config first so logging can be toggled (log_enabled in config.json).
+  if (!OmenHal::Get().Initialize())
+    OmenLog("[OMEN] HAL initialization failed\n");
+
+  // Load config (reads power_mode, fan_mode from config.json). Must run AFTER
+  // HAL init so SetMode can write to the EC.
   FanService::Get();
   OmenLogSetEnabled(FanService::Get().GetOverlayConfig().logEnabled);
   OmenLogStart();
   OmenLog("[OMEN] app start\n");
-
-  if (!OmenHal::Get().Initialize())
-    OmenLog("[OMEN] HAL initialization failed\n");
 
   TrayManager tray;
   tray.Start();

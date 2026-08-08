@@ -2,7 +2,6 @@
 #include <windows.h>
 #include <cstdint>
 #include "PawnIO.h"
-#include <string>
 #include <vector>
 
 void LogEc(const std::string& msg);

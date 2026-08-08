@@ -62,6 +62,9 @@ void ToggleAutoStart() {
 MainWindowWin32::MainWindowWin32() { RegisterClassOnce(); }
 
 MainWindowWin32::~MainWindowWin32() {
+  if (m_boldFont) DeleteObject(m_boldFont);
+  if (m_normFont) DeleteObject(m_normFont);
+  if (m_smallFont) DeleteObject(m_smallFont);
   if (m_hwnd && !m_destroyed) DestroyWindow(m_hwnd);
 }
 
@@ -98,6 +101,18 @@ void MainWindowWin32::Show() {
   ShowWindow(m_hwnd, SW_SHOW);
   UpdateWindow(m_hwnd); // force immediate first paint
   m_timerId = SetTimer(m_hwnd, 1, 2000, nullptr);
+  m_boldFont = CreateFontW(-15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                           CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                           DEFAULT_PITCH, L"Segoe UI");
+  m_normFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                           CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                           DEFAULT_PITCH, L"Segoe UI");
+  m_smallFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                            CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                            DEFAULT_PITCH, L"Segoe UI");
 }
 
 void MainWindowWin32::Hide() { if (m_hwnd) ShowWindow(m_hwnd, SW_HIDE); }
@@ -169,6 +184,14 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
       if (self->m_timerId) KillTimer(hwnd, self->m_timerId);
       self->m_destroyed = true;
     }
+    PostQuitMessage(0);
+    return 0;
+  case WM_CLOSE:
+    if (self && FanService::Get().GetOverlayConfig().minimizeOnClose) {
+      self->Hide();
+      return 0;
+    }
+    DestroyWindow(hwnd);
     return 0;
   }
   return DefWindowProcW(hwnd, msg, wp, lp);
@@ -324,18 +347,6 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     DeleteObject(bg);
   }
 
-  HFONT boldFont =
-      CreateFontW(-15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                  ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-  HFONT normFont =
-      CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                  ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-  HFONT smallFont =
-      CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                  ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
   SetBkMode(mem, TRANSPARENT);
 
   auto cardBg = [&](int y, int cardH) {
@@ -352,13 +363,13 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     old = SelectObject(mem, nb);
     HGDIOBJ oldPen = SelectObject(mem, p);
     RoundRect(mem, c.left, c.top, c.right, c.bottom, 12, 12);
-    SelectObject(mem, old);
     SelectObject(mem, oldPen);
+    SelectObject(mem, old);
     DeleteObject(p);
   };
   auto cardTitle = [&](int y, const wchar_t *t) {
     RECT tr = { kCardPad + 10, y, w - kCardPad - 10, y + 22 };
-    SelectObject(mem, normFont);
+    SelectObject(mem, m_normFont);
     SetTextColor(mem, RGB(230, 230, 230));
     DrawTextW(mem, t, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   };
@@ -386,7 +397,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   auto metricRow = [&](int y, const wchar_t *label, const wchar_t *value,
                        COLORREF vc, float load) {
     RECT lr = { kCardPad + 10, y, kCardPad + 110, y + kRowH };
-    SelectObject(mem, normFont);
+    SelectObject(mem, m_normFont);
     SetTextColor(mem, RGB(230, 230, 230));
     DrawTextW(mem, label, -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
@@ -437,7 +448,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
         DeleteObject(b);
       }
       SetTextColor(mem, i == active ? RGB(255, 255, 255) : RGB(142, 142, 147));
-      SelectObject(mem, normFont);
+      SelectObject(mem, m_normFont);
       RECT pr = { px0, y, px1, y + ph };
       DrawTextW(mem, labels[i], -1, &pr,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -452,12 +463,12 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     DeleteObject(b);
     if (on) {
       SetTextColor(mem, RGB(255, 255, 255));
-      SelectObject(mem, boldFont);
+      SelectObject(mem, m_boldFont);
       DrawTextW(mem, L"\u2713", -1, &br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     RECT tr = { kCardPad + 32, y, w - kCardPad - 10, y + kRowH };
     SetTextColor(mem, RGB(230, 230, 230));
-    SelectObject(mem, normFont);
+    SelectObject(mem, m_normFont);
     DrawTextW(mem, label, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     m_chk[slot][0] = y;
     m_chk[slot][1] = y + kRowH;
@@ -474,7 +485,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
                   total > 0 ? total : 0.0f);
     RECT hr = { kCardPad, y, w - kCardPad, y + 14 };
     SetTextColor(mem, RGB(230, 230, 230));
-    SelectObject(mem, smallFont);
+    SelectObject(mem, m_smallFont);
     DrawTextW(mem, powerBuf, -1, &hr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   }
   y += 16;
@@ -487,7 +498,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     wcscat_s(hwBuf, gpuBuf);
     RECT hr = { kCardPad, y, w - kCardPad, y + 13 };
     SetTextColor(mem, RGB(140, 140, 147));
-    SelectObject(mem, smallFont);
+    SelectObject(mem, m_smallFont);
     DrawTextW(mem, hwBuf, -1, &hr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   }
   y += 16;
@@ -548,7 +559,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     std::wstring wlabel(label.begin(), label.end());
     int labelEnd = w - kCardPad - 10 - 80; // leave room for temp value
     RECT lr = { kCardPad + 10, y, labelEnd, y + kRowH };
-    SelectObject(mem, normFont);
+    SelectObject(mem, m_normFont);
     SetTextColor(mem, RGB(230, 230, 230));
     DrawTextW(mem, wlabel.c_str(), -1, &lr,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -571,7 +582,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   {
     RECT sr = { kCardPad + 10, y, w - kCardPad - 10, y + 16 };
     SetTextColor(mem, RGB(230, 230, 230));
-    SelectObject(mem, normFont);
+    SelectObject(mem, m_normFont);
     DrawTextW(mem, L"Power Modes", -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   }
   y += 18;
@@ -584,7 +595,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   {
     RECT sr = { kCardPad + 10, y, w - kCardPad - 10, y + 16 };
     SetTextColor(mem, RGB(230, 230, 230));
-    SelectObject(mem, normFont);
+    SelectObject(mem, m_normFont);
     DrawTextW(mem, L"Fan Profiles", -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   }
   y += 18;
@@ -599,7 +610,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   {
     RECT sr = { kCardPad + 10, y, w - kCardPad - 10, y + 16 };
     SetTextColor(mem, RGB(230, 230, 230));
-    SelectObject(mem, normFont);
+    SelectObject(mem, m_normFont);
     DrawTextW(mem, L"GPU MUX", -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   }
   y += 18;
@@ -625,7 +636,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     // -30 label.
     RECT lr = { kCardPad + 10, y, kCardPad + 30, y + 16 };
     SetTextColor(mem, RGB(140, 140, 147));
-    SelectObject(mem, smallFont);
+    SelectObject(mem, m_smallFont);
     DrawTextW(mem, L"-30", -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     // 0 label.
     RECT r0 = { w - kCardPad - 10 - 14, y, w - kCardPad - 10, y + 16 };
@@ -661,7 +672,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     RECT rr = { kCardPad + 10, y, w - kCardPad - 10, y + 18 };
     std::swprintf(buf, sizeof(buf), L"Set: %d counts", co);
     SetTextColor(mem, RGB(140, 140, 147));
-    SelectObject(mem, smallFont);
+    SelectObject(mem, m_smallFont);
     DrawTextW(mem, buf, -1, &rr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
   }
   y += 20;
@@ -693,12 +704,12 @@ void MainWindowWin32::OnPaint(HDC hdc) {
       DeleteObject(b);
       if (on) {
         SetTextColor(mem, RGB(255, 255, 255));
-        SelectObject(mem, boldFont);
+        SelectObject(mem, m_boldFont);
         DrawTextW(mem, L"\u2713", -1, &br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
       }
       RECT tr = { x0 + 20, y, x0 + 20 + labelW, y + kRowH };
       SetTextColor(mem, RGB(230, 230, 230));
-      SelectObject(mem, normFont);
+      SelectObject(mem, m_normFont);
       DrawTextW(mem, label, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
       m_chk[slot][0] = y;
       m_chk[slot][1] = y + kRowH;
@@ -718,7 +729,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     std::swprintf(buf, sizeof(buf), L"HUD Visibility: %d%%",
                   (int)(FanService::Get().GetOverlayConfig().opacity * 100.0f));
     SetTextColor(mem, RGB(230, 230, 230));
-    SelectObject(mem, normFont);
+    SelectObject(mem, m_normFont);
     DrawTextW(mem, buf, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   }
   y += kRowH - 4;
@@ -767,7 +778,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     SelectObject(mem, old);
     DeleteObject(b);
     SetTextColor(mem, RGB(230, 230, 230));
-    SelectObject(mem, normFont);
+    SelectObject(mem, m_normFont);
     DrawTextW(mem, L"Flush RAM Cache", -1, &br,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     // Subtle border like Slint std-widgets button.
@@ -782,17 +793,13 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   }
 
   (void)card2y;
-  (void)card3y;
-  (void)card4y;
+  (void)card3y; // referenced only in card height computation
 
   // Present: Blt while bmp is still selected in mem.
   BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
 
   // Restore + cleanup.
   SelectObject(mem, oldBmp);
-  DeleteObject(boldFont);
-  DeleteObject(normFont);
-  DeleteObject(smallFont);
   DeleteObject(bmp);
   DeleteDC(mem);
 }

@@ -45,11 +45,13 @@ ThermalService &ThermalService::Get() {
 
 ThermalService::ThermalService() {
   m_nvml.Initialize();
-  InitPdh();
   m_smart.ScanDrives();
 }
 
 void ThermalService::Update() {
+  // PDH CPU load must be initialized on the worker thread.
+  InitPdh();
+
   // 1. Temps (Always 1s)
   float cpuVal = 0;
   float t57 = OmenEc::Get().GetCpuTemp57();
@@ -168,7 +170,7 @@ void ThermalService::Update() {
   if (m_timer % 4 == 0) {
     m_smart.UpdateTemps();
     // EC fallback for disks where SMART reports no temp (this model).
-    auto &drives = const_cast<std::vector<DriveInfo> &>(m_smart.GetDrives());
+    auto &drives = m_smart.GetDrives();
     for (size_t i = 0; i < drives.size(); ++i) {
       if (drives[i].Temperature <= 0 || drives[i].Temperature > 100) {
         float t = (i == 0) ? (float)OmenEc::Get().ReadByte(0x4A)
