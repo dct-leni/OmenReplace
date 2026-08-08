@@ -1,7 +1,7 @@
 #include "PowerControl.h"
 #include "FanService.h"
-#include "NvApiHelper.h"
 #include "OmenEc.h"
+#include "OmenLog.h"
 #include "WmiHelper.h"
 #include <algorithm>
 #include <cmath>
@@ -57,7 +57,9 @@ PowerControl &PowerControl::Get() {
   return instance;
 }
 
-PowerControl::PowerControl() { Update(); }
+// BackgroundLoop owns persistent WMI access. Constructing here can bind the
+// helper to the UI thread before the worker starts.
+PowerControl::PowerControl() {}
 
 void PowerControl::Update() {
   // 1. Read current mode from EC
@@ -172,25 +174,6 @@ bool PowerControl::SetGpuPower(uint8_t level) {
   return CallHpBios(0x20008, 0x22, data, 4, 0);
 }
 
-bool PowerControl::SetGpuMode(int mode) {
-  // 0=Hybrid, 1=Discrete
-  // BiosCmd.GpuMode = 0x00002
-  // CMD_GPU_SET_MODE = 0x52
-  // Data: 4 bytes, [0]=mode
-
-  uint8_t data[4] = {(uint8_t)mode, 0, 0, 0};
-  bool success = CallHpBios(0x00002, 0x52, data, 4, 0);
-
-  return success;
-}
-
-bool PowerControl::ExtendFanCountdown() {
-  uint8_t data[4] = {0x1E, 0, 0, 0};
-  // Always use background WMI helper since this is only called from background
-  // thread
-  return CallHpBios(0x20008, 0x31, data, 4, 0, &m_wmiBg);
-}
-
 bool PowerControl::SetFanLevelWmiBg(int cpuPercent, int gpuPercent) {
   // CMD_FAN_SET_LEVEL = 0x2E
   // Scaling: 55 = ~5500 RPM (100%)
@@ -214,23 +197,6 @@ bool PowerControl::SetFanLevelWmi(int cpuPercent, int gpuPercent) {
   return success;
 }
 
-bool PowerControl::GetFanLevelWmi(int &cpuLevel, int &gpuLevel) {
-  // CMD_FAN_GET_LEVEL = 0x2D
-  WmiHelper wmi;
-  if (!wmi.Initialize())
-    return false;
-
-  std::vector<uint8_t> out;
-  if (wmi.ExecuteHpBiosMethod(0x20008, 0x2D, NULL, 0, out, 128)) {
-    if (out.size() >= 2) {
-      cpuLevel = out[0];
-      gpuLevel = out[1];
-      return true;
-    }
-  }
-  return false;
-}
-
 void PowerControl::RequestGpuMode(int mode) {
   if (GetGpuModeInt() == mode)
     return;
@@ -240,77 +206,30 @@ void PowerControl::RequestGpuMode(int mode) {
   m_gpuMode = mode;
 }
 
-PowerControl::GpuOverclockSettings PowerControl::GetGpuOverclock() {
-  GpuOverclockSettings s;
-
-  // Keep a persistent NvApiHelper in a static to avoid reinitializing per frame
-  // This is safe because PowerControl::GetGpuOverclock is only called from UI
-  static NvApiHelper nvapi;
-  static bool nvInit = false;
-  if (!nvInit) {
-    s.isNvidia = nvapi.Initialize();
-    nvInit = true;
-  } else {
-    s.isNvidia = nvapi.IsInitialized();
-  }
-
-  s.isSupported = s.isNvidia;
-
-  if (s.isNvidia) {
-    // Read real clock offsets
-    nvapi.GetClockOffsets(s.coreClockOffset, s.memoryClockOffset);
-
-    // Read real power limit
-    nvapi.GetPowerLimitPercent(s.powerLimitPercent);
-
-    // Read range for sliders
-    nvapi.GetPowerLimitRange(s.pwrMin, s.pwrMax);
-    // Core/mem offset range is ±500/+1000 by convention (Afterburner standard)
-    s.coreMin = -500;
-    s.coreMax = 500;
-    s.memMin = -500;
-    s.memMax = 1000;
-  }
-
-  return s;
-}
-
-bool PowerControl::SetGpuOverclock(const GpuOverclockSettings &settings) {
-  static NvApiHelper nvapi;
-  static bool nvInit = false;
-  if (!nvInit)
-    nvInit = nvapi.Initialize();
-
-  if (!nvapi.IsInitialized())
-    return false;
-
-  bool ok = true;
-  ok &= nvapi.SetClockOffsets(settings.coreClockOffset,
-                              settings.memoryClockOffset);
-  ok &= nvapi.SetPowerLimitPercent(settings.powerLimitPercent);
-  return ok;
-}
-
 int PowerControl::GetBatteryChargeLimit() {
-  // WMI only tells us enabled(0x01) or disabled(0x00).
-  // If disabled -> 100%. If enabled -> return saved custom percentage (or 80
-  // default).
-
+  // Primary: persisted config (survives restarts). Saved by SetBatteryChargeLimit.
+  auto &oc = FanService::Get().GetOverlayConfig();
+  int cfgLimit = oc.batteryLimit;
+  if (cfgLimit >= 60 && cfgLimit <= 100) {
+    m_batteryLimitPercent = cfgLimit;
+    return cfgLimit;
+  }
+  // Fallback: WMI 0x24 readback. May fail early in startup (WMI not ready).
   WmiHelper wmi;
   if (!wmi.Initialize())
-    return m_batteryLimitPercent; // return cached value on WMI failure
+    return m_batteryLimitPercent;
 
-  auto &oc = FanService::Get().GetOverlayConfig();
-  int currentLimit = oc.batteryLimit;
-  
-  // BIOS masks battery read values on many firmwares (returning empty arrays).
-  // We trust the locally persisted user config set by APPLY as the solitary truth.
-  if (currentLimit < 60 || currentLimit > 100) {
-      currentLimit = 100; // Default to standard 100% disabled
-      oc.batteryLimit = currentLimit;
+  uint8_t data[4] = {0};
+  std::vector<uint8_t> out;
+  if (wmi.ExecuteHpBiosMethod(0x20008, 0x24, data, 4, out, 4) &&
+      out.size() >= 1) {
+    int readLimit = (out[0] == 0x01) ? 80 : 100;
+    m_batteryLimitPercent = readLimit;
+    oc.batteryLimit = readLimit;
+    return readLimit;
   }
 
-  return currentLimit;
+  return m_batteryLimitPercent; // WMI failed — last known value
 }
 
 bool PowerControl::SetBatteryChargeLimit(int limitPercent) {
@@ -356,32 +275,41 @@ void PowerControl::SetMode(PowerMode mode) {
   CheckThermalPolicy();
 
   uint8_t ecValue = 0x00;
-  uint8_t gpuLevel = 1;     // Medium
 
   switch (mode) {
   case PowerMode::Eco:
     ecValue = 0x02;
-    gpuLevel = 0; // Min
     break;
   case PowerMode::Balanced:
     ecValue = 0x00;
-    gpuLevel = 1; // Med
     break;
   case PowerMode::Performance:
   case PowerMode::Turbo:
     ecValue = 0x01;
-    gpuLevel = 2; // Max
     break;
   }
 
-  // 1. Write to EC (Direct)
   OmenEc::Get().WriteByte(0xCE, ecValue);
-
-  // 3. Set GPU Power (BIOS)
-  SetGpuPower(gpuLevel);
-
-  // 4. Set Windows Power Plan (Overlay)
   SetWindowsPowerPlan(mode);
+
+  // Apply CPU power (STAPM) limit per mode via MP1 SMU.
+  // Eco=25W, Balanced=45W, Performance/Turbo=Unlimited (skip the limit so the
+  // firmware keeps its default). Best-effort: ignore failure to stay robust.
+  if (mode == PowerMode::Eco)
+    SetStapmLimit(25);
+  else if (mode == PowerMode::Balanced)
+    SetStapmLimit(45);
+  // Performance / Turbo: leave the power limit untouched (unlimited).
+
+  // Verify: read back the firmware's current limits and log them (debug only).
+  {
+    int pw = 0, tc = 0;
+    if (GetPowerThermalLimits(pw, tc))
+      OmenLog("[OMEN] power_mode=%d -> smu_power_limit=%dW smu_temp_limit=%dC\n",
+              (int)mode, pw, tc);
+    else
+      OmenLog("[OMEN] power_mode=%d smu_readback FAILED\n", (int)mode);
+  }
 
   {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -461,27 +389,10 @@ std::string PowerControl::GetGpuModeStr() {
   }
 }
 
-// CPU Undervolting Implementation (Intel MSR 0x150)
-int PowerControl::GetCpuCoreOffset() {
-  // Placeholder: This requires reading MSR 0x150 with command 0x10 and Plane 0
-  return 0;
-}
-
-int PowerControl::GetCpuCacheOffset() {
-  // Placeholder: This requires reading MSR 0x150 with command 0x10 and Plane 2
-  return 0;
-}
-
-bool PowerControl::SetCpuUndervolt(int coreMv, int cacheMv) {
-  // MSR 0x150 is the OC Mailbox
-  // Bit 63: Write(1)
-  // Bits 47:40: Plane (0=Core, 2=Cache)
-  // Bits 39:32: Command (0x11=Write)
-  // Bits 31:21: Offset (mV * 1024 / 1000, two's complement)
-
-  // Implementation requires OmenEc's PawnIO instance to load IntelMSR.bin
-  return false; // Not yet fully implemented due to driver setup
-}
+// CPU Undervolting: AMD-only (Intel MSR 0x150 not supported)
+int PowerControl::GetCpuCoreOffset() { return 0; }
+int PowerControl::GetCpuCacheOffset() { return 0; }
+bool PowerControl::SetCpuUndervolt(int, int) { return false; }
 bool PowerControl::SetAmdCurveOptimizer(int coCounts) {
   // Safety clamp: -30 to +30
   int counts = coCounts;
@@ -548,23 +459,45 @@ int PowerControl::GetAmdCurveOptimizer() {
   return 0;
 }
 
-bool PowerControl::SetCpuPowerLimitW(int watts) {
-  // watts: 0 = Uncapped, 25..75 = PPT limit cap for Ryzen 9 8940HX
-  m_cpuPowerLimitW = watts;
+
+bool PowerControl::SetStapmLimit(int watts) {
   OmenEc &ec = OmenEc::Get();
   if (!ec.IsInitialized()) return false;
 
-  // Send Fast PPT & Slow PPT limit via SMU if custom wattage is specified
-  if (watts > 0) {
-    uint32_t valMilliwatts = (uint32_t)(watts * 1000);
-    uint32_t argsFast[6] = {valMilliwatts, 0, 0, 0, 0, 0};
-    uint32_t argsSlow[6] = {valMilliwatts, 0, 0, 0, 0, 0};
-    
-    // Command 0x53 = Fast PPT, 0x54 = Slow PPT for AMD Ryzen 7000/8000/9000 HX
-    ec.SendSmuCommand(0x53, argsFast);
-    ec.SendSmuCommand(0x54, argsSlow);
-  }
+  // Zen4Settings: MP1 SMU_MSG_SetStapmLimit = 0x4F, args[0] = watts*1000.
+  int w = watts;
+  if (w < 15) w = 15;
+  if (w > 54) w = 54; // omenecore clamp 15-54W
+
+  uint32_t args[6] = {(uint32_t)(w * 1000), 0, 0, 0, 0, 0};
+  return ec.SendMp1Command(0x4F, args);
+}
+
+bool PowerControl::GetPowerThermalLimits(int &powerW, int &tempC) {
+  OmenEc &ec = OmenEc::Get();
+  if (!ec.IsInitialized()) return false;
+
+  // Zen4Settings: MP1 SMU_MSG_GetSustainedPowerAndThmLimit = 0x23.
+  // args[0]: bits [23:16] = power limit W, bits [7:0] = temp limit °C.
+  uint32_t args[6] = {0, 0, 0, 0, 0, 0};
+  if (!ec.SendMp1Command(0x23, args)) return false;
+
+  powerW = (int)((args[0] >> 16) & 0xFF);
+  tempC = (int)(args[0] & 0xFF);
   return true;
+}
+
+bool PowerControl::SetTctlTemp(int tempC) {
+  OmenEc &ec = OmenEc::Get();
+  if (!ec.IsInitialized()) return false;
+
+  // Zen4Settings: MP1 SMU_MSG_SetTctlMax = 0x3F, args[0] = temp in Celsius.
+  int t = tempC;
+  if (t < 75) t = 75;
+  if (t > 105) t = 105;
+
+  uint32_t args[6] = {(uint32_t)t, 0, 0, 0, 0, 0};
+  return ec.SendMp1Command(0x3F, args);
 }
 
 bool PowerControl::FlushMemoryWorkingSet() {

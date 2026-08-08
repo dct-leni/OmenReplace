@@ -3,9 +3,9 @@
 #include <cstdint>
 #include "PawnIO.h"
 #include <string>
+#include <vector>
 
 void LogEc(const std::string& msg);
-void LogSmu(const std::string& msg);
 
 // Hardware Abstraction for Omen Embedded Controller
 // Implements fan speed reading and control
@@ -21,7 +21,6 @@ public:
     float GetFan2Speed();
     float GetFan1Percentage(); // Reads 0x2E
     float GetFan2Percentage(); // Reads 0x2F
-    float GetCpuTemp(); 
     float GetGpuTemp(); 
 
     // PCI Config Access via PawnIO
@@ -34,6 +33,11 @@ public:
     bool SmuWriteReg(uint32_t smnAddr, uint32_t val);
     // Send a command to the SMU via RSMU mailbox. args is 6-element array (in/out).
     bool SendSmuCommand(uint32_t cmd, uint32_t* args);
+    // Send a command to the MP1 (Power Management) mailbox via raw SMN writes.
+    // ioctl_send_smu_command only supports RSMU, so MP1 (e.g. STAPM 0x4F) is
+    // done here. SMN addresses from ZenStates Zen4Settings: MSG=0x3B10530,
+    // RSP=0x3B1057C, ARG=0x3B109C4. args is 6-element array (in/out).
+    bool SendMp1Command(uint32_t cmd, uint32_t* args);
     
     // Fan Control
     void SetFanMode(bool manual);
@@ -44,18 +48,27 @@ public:
     float GetCpuTemp57(); // CPUT
     float GetCpuTemp58(); // RTMP
     
-    // SSD Sensors (Device specific offsets)
-    float GetSsd1Temp();
-    float GetSsd2Temp();
-    uint8_t ReadRegister(uint8_t addr) { return ReadByte(addr); }
-    
-    // Debug: Read a range of registers
-    std::vector<uint8_t> ReadEcRange(uint8_t start, uint8_t count);
-    
     uint8_t ReadByte(uint8_t offset);
     uint16_t ReadWord(uint8_t offset_l, uint8_t offset_h);
     void WriteByte(uint8_t offset, uint8_t value);
-    
+
+    // SMBus DIMM thermal via embedded SmbusPIIX4.bin module (kernel SMBus
+    // driver, handles FCH port mux). ioctls: ioctl_identity,
+    // ioctl_piix4_port_sel, ioctl_smbus_xfer.
+    bool EnableSmbusPci();                  // init module + find DIMM port
+    bool SmbusSelectPort(int port);          // route port mux (valid: 0,2,3,4)
+    bool SmbusReadByte(uint8_t addr7, uint8_t cmd, uint8_t &val);
+    bool SmbusWriteByte(uint8_t addr7, uint8_t cmd, uint8_t value);
+    bool SmbusReadWord(uint8_t addr7, uint8_t cmd, uint16_t &val); // word-data read
+    // Probe DIMM thermal sensors (TSE2004). Returns °C for channel, 0 if none.
+    float GetDimmTemp(int channel);
+
+    // Try reading an MSR via PawnIO (RAPL energy counter for CPU power)
+    bool TryReadMsr(uint32_t msr, std::vector<uint64_t> &out);
+    // CPU package power via MSR RAPL energy counter (embedded AMDFamily17.bin).
+    // Returns W, 0 if unavailable.
+    float GetCpuPackagePower();
+
 private:
     OmenEc();
     ~OmenEc();
@@ -65,6 +78,12 @@ private:
     bool m_initialized = false;
     PawnIO* m_pawn = nullptr;
     PawnIO* m_smuPawn = nullptr;
+    PawnIO* m_msrPawn = nullptr;   // embedded AMDFamily17 module (ioctl_read_msr)
+    PawnIO* m_smbusPawn = nullptr; // embedded SmbusPIIX4 module (ioctl_smbus_xfer)
+    int m_smbusPort = 0;           // SMBus port hosting the DIMMs
+    uint8_t m_smbusSpdAddr = 0;    // SPD EEPROM addr (0x50-0x57) of DIMM 0
+    uint32_t m_lastEnergy = 0;
+    uint64_t m_lastEnergyTime = 0;
     
     // Helpers
     uint8_t ReadPort(uint16_t port);
@@ -72,32 +91,22 @@ private:
     bool WaitEcInputEmpty();
     bool WaitEcOutputFull();
     
-    // HP Omen EC offsets (Reverted to Little Endian)
     // HP Omen EC offsets (Dynamic based on model research)
-    // HP Omen standard RPM registers (from OmenMon)
-    static const uint8_t EC_RPM1_L = 0xB0; 
-    static const uint8_t EC_RPM1_H = 0xB1;
-    static const uint8_t EC_RPM2_L = 0xB2;
-    static const uint8_t EC_RPM2_H = 0xB3;
+    // Source of truth: external_source/omencore PawnIOEcAccess.cs + FanController.cs
+    // NOTE: 0xB0-0xB3 are KEYBOARD RGB registers, NOT fan RPM!
     
-    // RTMP=0x58, CPUT=0x57. 
-    static const uint8_t EC_CPUT = 0x57; 
-    static const uint8_t EC_RTMP = 0x58; 
-    static const uint8_t EC_GPU_TEMP = 0x59; 
-    static const uint8_t EC_EBPL = 0xD0;
-    static const uint8_t EC_DBPL = 0xD6;
-    
-    // Fan Control (ck2 series optimized)
     // Fan Control
-    static const uint8_t EC_XSS1 = 0x2C; // L Fan Set Speed [%]
-    static const uint8_t EC_XSS2 = 0x2D; // R Fan Set Speed [%]
-    static const uint8_t EC_SRP1 = 0x34; // L Fan Set Speed [krpm]
-    static const uint8_t EC_SRP2 = 0x35; // R Fan Set Speed [krpm]
-    static const uint8_t EC_XGS1 = 0x2E; // L Fan Get Speed [%] / Manual Override
-    static const uint8_t EC_XGS2 = 0x2F; // R Fan Get Speed [%]
-    static const uint8_t EC_OMCC = 0x62; // Manual Fan Control toggle
-    static const uint8_t EC_XFCD = 0x63; // Manual Fan Heartbeat [s]
-    static const uint8_t EC_HPCM = 0x95; // Performance Mode / Thermal Policy
-    static const uint8_t EC_FFFF = 0xEC; // Max Fan Toggle
-    static const uint8_t EC_SFAN = 0xF4; // Fan Toggle Switch
+    static const uint8_t EC_XSS1 = 0x2C; // L Fan Set Duty [%] (write)
+    static const uint8_t EC_XSS2 = 0x2D; // R Fan Set Duty [%] (write)
+    static const uint8_t EC_XGS1 = 0x2E; // L Fan Get Duty [%] (read)
+    static const uint8_t EC_XGS2 = 0x2F; // R Fan Get Duty [%] (read)
+    static const uint8_t EC_OMCC = 0x62; // Manual Fan Control toggle (0x06=Manual, 0x00=Auto)
+    static const uint8_t EC_XFCD = 0x63; // Manual Fan Heartbeat [s] (0x1E=30s watchdog)
+    static const uint8_t EC_FFFF = 0xEC; // Fan Boost (0x0C=ON, 0x00=OFF)
+    static const uint8_t EC_SFAN = 0xF4; // Fan State (0x00=Enable, 0x02=Disable)
+
+    // Temperature
+    static const uint8_t EC_CPUT = 0x57;    // CPU Package Temperature (°C)
+    static const uint8_t EC_RTMP = 0x58;    // CPU Core Temperature (°C)
+    static const uint8_t EC_GPU_TEMP = 0xB7; // GPU Temperature (°C) — 0x59 wrong, 0xB7 correct (omencore+OmenCtl)
 };

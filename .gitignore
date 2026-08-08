@@ -1,10 +1,8 @@
 # Build & Output Directories
 build/
 output/
-bin/
-out/
 CMakeFiles/
-external_source/
+CMakeLists.txt
 
 # Cache & Toolchain Cache Directories
 .cache/
@@ -13,14 +11,8 @@ external_source/
 .vscode/
 .idea/
 .agents/
-
-# CMake Generated Files
-CMakeCache.txt
-Makefile
-cmake_install.cmake
-compile_commands.json
-*.cmake
-static_pthread.specs
+.graymatter/
+external_source/
 
 # Binary & Object Files
 *.a

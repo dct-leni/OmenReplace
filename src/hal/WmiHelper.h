@@ -2,7 +2,6 @@
 #include <Wbemidl.h>
 #include <comdef.h>
 #include <cstdint>
-#include <map>
 #include <string>
 #include <variant>
 #include <vector>
@@ -12,14 +11,6 @@
 #ifdef _MSC_VER
 #pragma comment(lib, "wbemuuid.lib")
 #endif
-
-// Global struct to avoid scope issues
-struct LhmSensorResult {
-  std::wstring Name;
-  std::wstring Identifier;
-  std::wstring SensorType;
-  float Value;
-};
 
 class WmiHelper {
 public:
@@ -36,13 +27,6 @@ public:
   // Executes a WQL query (multiple integer values, e.g. thermal zones)
   bool ExecQueryAll(const std::wstring &query, const std::wstring &propertyName,
                     std::vector<int> &outValues);
-
-  // Specific query for LibreHardwareMonitor sensors
-  bool QueryLhmSensors(std::vector<LhmSensorResult> &outSensors);
-
-  bool ExecuteMethod(const std::wstring &className,
-                     const std::wstring &methodName,
-                     const std::wstring &paramName, int paramValue);
 
   // HP Omen Specific
   bool ExecuteHpBiosMethod(uint32_t command, uint32_t commandType,

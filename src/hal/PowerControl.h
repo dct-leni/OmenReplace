@@ -23,24 +23,6 @@ public:
   }
   void RequestGpuMode(int mode);
 
-  // GPU Overclocking
-  struct GpuOverclockSettings {
-    bool isNvidia = true;
-    bool isSupported = true;
-    int coreClockOffset = 0;
-    int memoryClockOffset = 0;
-    int powerLimitPercent = 100;
-
-    int coreMin = -150;
-    int coreMax = 250;
-    int memMin = -500;
-    int memMax = 1500;
-    int pwrMin = 50;
-    int pwrMax = 120;
-  };
-  GpuOverclockSettings GetGpuOverclock();
-  bool SetGpuOverclock(const GpuOverclockSettings &settings);
-
   // CPU Undervolting
   int GetCpuCoreOffset();
   int GetCpuCacheOffset();
@@ -50,13 +32,19 @@ public:
   int GetCachedAmdCurveOptimizer() { return m_amdCurveOptimizer; }
   void SetCachedAmdCurveOptimizer(int val) { m_amdCurveOptimizer = val; }
 
+  // CPU power limits via MP1 SMU (Zen4Settings: STAPM 0x4F).
+  // watts: 15..54 W sustained power limit (args[0] in milliwatts).
+  bool SetStapmLimit(int watts);
+  // Read current power/temp limits via MP1 GetSustainedPowerAndThmLimit (0x23).
+  // args[0]: bits [23:16] = power limit W, bits [7:0] = temp limit °C.
+  // Returns false if unavailable.
+  bool GetPowerThermalLimits(int &powerW, int &tempC);
+  // Set CPU temperature (Tctl) limit via MP1 SetTctlMax (0x3F). 75..105°C.
+  bool SetTctlTemp(int tempC);
+
   // Battery Care
   int GetBatteryChargeLimit();
   bool SetBatteryChargeLimit(int limitPercent);
-
-  // CPU Power Limits (PPT / Sustained Power Limit in Watts for Ryzen 9 8940HX)
-  int GetCpuPowerLimitW() { return m_cpuPowerLimitW; }
-  bool SetCpuPowerLimitW(int watts);
 
   // Memory & System Optimization
   bool FlushMemoryWorkingSet();
@@ -69,8 +57,6 @@ public:
   bool SetFanLevelWmiBg(
       int cpuPercent,
       int gpuPercent); // Background thread version (uses persistent WMI)
-  bool GetFanLevelWmi(int &cpuLevel, int &gpuLevel);
-  bool ExtendFanCountdown(); // WMI Heartbeat (0x31)
 
 private:
   PowerControl();
@@ -80,7 +66,6 @@ private:
   int m_gpuMode = -1; // 0=Hybrid, 1=Discrete, 2=Optimus
   int m_batteryLimitPercent = 100; // Cached battery threshold (WMI only knows on/off)
   int m_amdCurveOptimizer = 0;
-  int m_cpuPowerLimitW = 0; // 0 = Uncapped/Default
 
   // WMI HP BIOS Helper
   bool CallHpBios(uint32_t cmd, uint32_t type, uint8_t *data, size_t size,
@@ -92,7 +77,6 @@ private:
   // Internal helpers
   void CheckThermalPolicy();
   bool SetGpuPower(uint8_t level); // 0=Min, 1=Med, 2=Max
-  bool SetGpuMode(int mode);       // 0=Hybrid, 1=Discrete
 
   enum class ThermalPolicyVersion { V0_Legacy, V1_Modern, Unknown };
   ThermalPolicyVersion m_thermalPolicy = ThermalPolicyVersion::Unknown;

@@ -1,13 +1,11 @@
 #pragma once
+#include "WmiHelper.h"
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 
-struct CurvePoint {
-  int temp;
-  int speed;
-};
-
-enum class FanControlMode { Auto, Manual, AppMode };
+enum class FanControlMode { Auto = 0, AppMode = 2 };
+enum class FanControlProfile { Default = 0, Quiet = 1, Cool = 2 };
 
 
 class FanService {
@@ -17,17 +15,15 @@ public:
   void Update(); // Called by HAL loop
 
   float GetFanSpeed(int index);
-  void SetFanSpeed(int index, int percent);
   void SetFanAuto();
 
   float GetFanPercentage(int index);
 
-  bool IsManualMode() const { return m_controlMode != FanControlMode::Auto; }
   FanControlMode GetControlMode() const { return m_controlMode; }
   void SetControlMode(FanControlMode mode);
 
-  CurvePoint *GetCpuCurve() { return m_cpuCurve; }
-  CurvePoint *GetGpuCurve() { return m_gpuCurve; }
+  FanControlProfile GetProfile() const { return m_profile.load(); }
+  void SetProfile(FanControlProfile profile);
 
   struct OverlayConfig {
     bool show = false;
@@ -38,8 +34,6 @@ public:
     float posY = 100.0f;
     float sizeW = 180.0f;
     float sizeH = 110.0f;
-    int presetIdx = 1;  // 0=ECO, 1=BALANCED, 2=GAMING, 3=TURBO
-    int cpuPptCap = 35; // Default for Balanced
     // Temperature thresholds (orange / red)
     float cpuWarn = 70.0f;
     float cpuCrit = 80.0f;
@@ -48,31 +42,36 @@ public:
     float diskWarn = 50.0f;
     float diskCrit = 60.0f;
     int batteryLimit = 100;
+    bool hudPassthrough = true;
+    bool minimizeOnClose = true;
+    bool logEnabled = false; // write omen_control.log (off by default)
+    int mainWinX = 100;
+    int mainWinY = 100;
+    int mainWinW = 680;
+    int mainWinH = 440;
+    int activeTab = 0;
   };
 
 
   OverlayConfig &GetOverlayConfig() { return m_overlayConfig; }
-  void SetOverlayConfig(const OverlayConfig &c) {
-    m_overlayConfig = c;
-    SaveConfig();
-  }
 
   void SaveConfig();
   void LoadConfig();
 
-  void Heartbeat();
+  // Worker-thread persistent WMI for fan RPM fallback
+  static WmiHelper &WmiRpm() { return Get().m_wmiRpm; }
 
 private:
   FanService();
 
   std::mutex m_mutex;
+  std::mutex m_hardwareMutex;
+  WmiHelper m_wmiRpm; // persistent WMI for fan RPM fallback (worker thread)
   float m_fan1Rpm = 0.0f;
   float m_fan2Rpm = 0.0f;
 
   std::atomic<FanControlMode> m_controlMode{FanControlMode::Auto};
-
-  CurvePoint m_cpuCurve[5];
-  CurvePoint m_gpuCurve[5];
+  std::atomic<FanControlProfile> m_profile{FanControlProfile::Default};
 
   int m_fan1Target = 0;
   int m_fan2Target = 0;
@@ -83,13 +82,75 @@ private:
   float m_avgCpu = 0.0f;
   float m_avgGpu = 0.0f;
 
-  // Optimized mode: GPU fan speed offset (default 20% less than CPU)
-  int m_optimizedGpuOffset = 20;
-
   // State tracking to reduce ACPI calls
   int m_lastAppliedFan1 = -1;
   int m_lastAppliedFan2 = -1;
-  int m_heartbeatCounter = 0;
+  std::atomic<bool> m_fanControlHealthy{false};
+
+  // PID controller — profile-tuned closed-loop regulation
+  // Calibrated against omencore / OmenXHub fan curves for 8940HX (Dragon Range,
+  // TjMax ≈100°C, typical idle 45-55°C, gaming 75-95°C).
+  struct FanPidController {
+    float setpoint = 72.0f;
+    float kp = 2.5f;
+    float ki = 0.25f;
+    float kd = 1.5f;
+    int minSpeed = 20;  // % minimum baseline (profile-dependent)
+    int maxSpeed = 100; // % cap (Quiet is capped at 85%)
+    float lastError = 0.0f;
+    float integral = 0.0f;
+    uint64_t lastTime = 0;
+
+    void ApplyPreset(FanControlProfile profile) {
+      reset();
+      if (profile == FanControlProfile::Quiet) {
+        setpoint = 78.0f; kp = 1.5f; ki = 0.12f; kd = 0.8f;
+        minSpeed = 15; maxSpeed = 85;
+      } else if (profile == FanControlProfile::Cool) {
+        setpoint = 65.0f; kp = 3.5f; ki = 0.4f; kd = 2.5f;
+        minSpeed = 28; maxSpeed = 100;
+      } else {
+        setpoint = 72.0f; kp = 2.5f; ki = 0.25f; kd = 1.5f;
+        minSpeed = 20; maxSpeed = 100;
+      }
+    }
+
+    void reset() { lastTime = 0; integral = 0.0f; lastError = 0.0f; }
+
+    int Compute(float temp, uint64_t nowMs) {
+      if (lastTime == 0) {
+        lastTime = nowMs;
+        lastError = temp - setpoint;
+        return minSpeed;
+      }
+      float dt = (nowMs - lastTime) / 1000.0f;
+      if (dt < 0.5f) dt = 0.5f;
+      if (dt > 3.0f) dt = 3.0f;
+
+      float error = temp - setpoint;
+      float p = kp * error;
+
+      integral += error * dt;
+      float iMax = 40.0f / (ki + 0.001f);
+      float iMin = -10.0f / (ki + 0.001f);
+      if (integral > iMax) integral = iMax;
+      if (integral < iMin) integral = iMin;
+      float i = ki * integral;
+
+      float derivative = (error - lastError) / dt;
+      float d = kd * derivative;
+
+      lastError = error;
+      lastTime = nowMs;
+
+      float raw = p + i + d;
+      int speed = minSpeed + (int)raw;
+      if (speed < minSpeed) speed = minSpeed;
+      if (speed > maxSpeed) speed = maxSpeed;
+      return speed;
+    }
+  };
+  FanPidController m_pid;
 
   OverlayConfig m_overlayConfig;
 };

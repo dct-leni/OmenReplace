@@ -1,9 +1,37 @@
 #include "FanService.h"
+#include "FanController.h"
 #include "OmenEc.h"
+#include "OmenHal.h"
+#include "OmenLog.h"
 #include "PowerControl.h"
+#include <nlohmann/json.hpp>
 #include "ThermalService.h"
+#include "TelemetryService.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <string>
+#include <windows.h>
+
+static void LogFanEvent(const char *format, int first = 0, int second = 0,
+                        int third = 0) {
+  char message[160];
+  std::snprintf(message, sizeof(message), format, first, second, third);
+  OmenLog("%s", message);
+}
+
+// Resolve config.json next to the EXE (not the CWD, which can be System32).
+static std::string ConfigPath() {
+  char path[MAX_PATH] = {};
+  DWORD length = GetModuleFileNameA(nullptr, path, MAX_PATH);
+  if (length == 0 || length >= MAX_PATH)
+    return "config.json";
+  std::string result(path, length);
+  size_t sep = result.find_last_of("\\/");
+  if (sep == std::string::npos)
+    return "config.json";
+  return result.substr(0, sep + 1) + "config.json";
+}
 
 FanService &FanService::Get() {
   static FanService instance;
@@ -13,212 +41,167 @@ FanService &FanService::Get() {
 #include <fstream>
 
 FanService::FanService() {
-  // Default Curve Points (Max 90C as requested)
-  static const int temps[5] = {40, 50, 65, 80, 90};
-  static const int cpuS[5] = {20, 40, 60, 80, 100};
-  static const int gpuS[5] = {10, 30, 50, 70, 90}; // 10% less
-
-  for (int i = 0; i < 5; i++) {
-    m_cpuCurve[i] = {temps[i], cpuS[i]};
-    m_gpuCurve[i] = {temps[i], gpuS[i]};
-  }
-
   LoadConfig();
-
-  // Transition old configs (100C) to 90C limit
-  for (int i = 0; i < 5; i++) {
-    if (m_cpuCurve[i].temp > 90)
-      m_cpuCurve[i].temp = 90;
-    if (m_gpuCurve[i].temp > 90)
-      m_gpuCurve[i].temp = 90;
-
-    // Ensure monotonicity after clamping
-    if (i > 0) {
-      if (m_cpuCurve[i].temp < m_cpuCurve[i - 1].temp)
-        m_cpuCurve[i].temp = m_cpuCurve[i - 1].temp;
-      if (m_gpuCurve[i].temp < m_gpuCurve[i - 1].temp)
-        m_gpuCurve[i].temp = m_gpuCurve[i - 1].temp;
-    }
-  }
 }
 
 void FanService::SaveConfig() {
-  std::ofstream f("config.json");
-  if (!f.is_open())
-    return;
-  f << "{\n";
-  FanControlMode fMode = m_controlMode.load();
-  int saveMode = (int)fMode;
-  if (fMode == FanControlMode::Manual)
-    saveMode = (int)FanControlMode::Auto;
-  f << "  \"fan_mode\": " << saveMode << ",\n";
-  f << "  \"power_mode\": " << (int)PowerControl::Get().GetCurrentMode()
-    << ",\n";
-  f << "  \"optimized_gpu_offset\": " << m_optimizedGpuOffset << ",\n";
+  nlohmann::json j;
+  j["fan_mode"] = (int)m_controlMode.load();
+  j["fan_profile"] = (int)m_profile.load();
+  j["power_mode"] = (int)PowerControl::Get().GetCurrentMode();
 
-  // Overlay & Application Settings
-  f << "  \"overlay\": {\n";
-  f << "    \"show\": " << (m_overlayConfig.show ? "true" : "false") << ",\n";
-  f << "    \"top\": " << (m_overlayConfig.top ? "true" : "false") << ",\n";
-  f << "    \"vertical\": " << (m_overlayConfig.vertical ? "true" : "false") << ",\n";
-  f << "    \"opacity\": " << m_overlayConfig.opacity << ",\n";
-  f << "    \"pos_x\": " << m_overlayConfig.posX << ",\n";
-  f << "    \"pos_y\": " << m_overlayConfig.posY << ",\n";
-  f << "    \"size_w\": " << m_overlayConfig.sizeW << ",\n";
-  f << "    \"size_h\": " << m_overlayConfig.sizeH << ",\n";
-  f << "    \"preset_idx\": " << m_overlayConfig.presetIdx << ",\n";
-  f << "    \"cpu_ppt_cap\": " << PowerControl::Get().GetCpuPowerLimitW() << ",\n";
-  f << "    \"cpu_warn\": " << m_overlayConfig.cpuWarn << ",\n";
-  f << "    \"cpu_crit\": " << m_overlayConfig.cpuCrit << ",\n";
-  f << "    \"gpu_warn\": " << m_overlayConfig.gpuWarn << ",\n";
-  f << "    \"gpu_crit\": " << m_overlayConfig.gpuCrit << ",\n";
-  f << "    \"disk_warn\": " << m_overlayConfig.diskWarn << ",\n";
-  f << "    \"disk_crit\": " << m_overlayConfig.diskCrit << ",\n";
-  f << "    \"battery_limit\": " << m_overlayConfig.batteryLimit << ",\n";
-  f << "    \"amd_curve_optimizer\": " << PowerControl::Get().GetCachedAmdCurveOptimizer() << "\n";
-  f << "  }\n";
-  f << "}\n";
+  nlohmann::json &ov = j["overlay"];
+  ov["show"] = m_overlayConfig.show;
+  ov["top"] = m_overlayConfig.top;
+  ov["vertical"] = m_overlayConfig.vertical;
+  ov["opacity"] = m_overlayConfig.opacity;
+  ov["pos_x"] = m_overlayConfig.posX;
+  ov["pos_y"] = m_overlayConfig.posY;
+  ov["size_w"] = m_overlayConfig.sizeW;
+  ov["size_h"] = m_overlayConfig.sizeH;
+  ov["cpu_warn"] = m_overlayConfig.cpuWarn;
+  ov["cpu_crit"] = m_overlayConfig.cpuCrit;
+  ov["gpu_warn"] = m_overlayConfig.gpuWarn;
+  ov["gpu_crit"] = m_overlayConfig.gpuCrit;
+  ov["disk_warn"] = m_overlayConfig.diskWarn;
+  ov["disk_crit"] = m_overlayConfig.diskCrit;
+  ov["battery_limit"] = m_overlayConfig.batteryLimit;
+  ov["hud_passthrough"] = m_overlayConfig.hudPassthrough;
+  ov["log_enabled"] = m_overlayConfig.logEnabled;
+  ov["amd_curve_optimizer"] = PowerControl::Get().GetCachedAmdCurveOptimizer();
+  ov["main_win_x"] = m_overlayConfig.mainWinX;
+  ov["main_win_y"] = m_overlayConfig.mainWinY;
+  ov["main_win_w"] = m_overlayConfig.mainWinW;
+  ov["main_win_h"] = m_overlayConfig.mainWinH;
+  ov["active_tab"] = m_overlayConfig.activeTab;
+  ov["minimize_on_close"] = m_overlayConfig.minimizeOnClose;
+
+  std::ofstream f(ConfigPath());
+  if (f.is_open())
+    f << j.dump(2);
 }
 
 void FanService::LoadConfig() {
-  std::ifstream f("config.json");
+  std::ifstream f(ConfigPath());
   if (!f.is_open())
     return;
 
-  std::string line;
-  bool inOverlay = false;
-  while (std::getline(f, line)) {
-    // Read fan_mode
-    if (line.find("\"fan_mode\"") != std::string::npos) {
-      size_t pos = line.find(":");
-      if (pos != std::string::npos) {
-        std::string valStr = line.substr(pos + 1);
-        valStr.erase(
-            std::remove_if(valStr.begin(), valStr.end(),
-                           [](unsigned char c) { return !std::isdigit(c); }),
-            valStr.end());
-        if (!valStr.empty()) {
-          m_controlMode = (FanControlMode)std::stoi(valStr);
-        }
-      }
-    }
-    // Read power_mode
-    if (line.find("\"power_mode\"") != std::string::npos) {
-      size_t pos = line.find(":");
-      if (pos != std::string::npos) {
-        std::string valStr = line.substr(pos + 1);
-        valStr.erase(
-            std::remove_if(valStr.begin(), valStr.end(),
-                           [](unsigned char c) { return !std::isdigit(c); }),
-            valStr.end());
-        if (!valStr.empty())
-          PowerControl::Get().SetMode((PowerMode)std::stoi(valStr));
-      }
-    }
-    // Read optimized_gpu_offset
-    if (line.find("\"optimized_gpu_offset\"") != std::string::npos) {
-      size_t pos = line.find(":");
-      if (pos != std::string::npos) {
-        std::string valStr = line.substr(pos + 1);
-        valStr.erase(
-            std::remove_if(valStr.begin(), valStr.end(),
-                           [](unsigned char c) { return !std::isdigit(c); }),
-            valStr.end());
-        if (!valStr.empty()) {
-          int offset = std::stoi(valStr);
-          m_optimizedGpuOffset = std::max(0, std::min(50, offset));
-        }
-      }
+  try {
+    nlohmann::json j = nlohmann::json::parse(f);
+
+    if (j.contains("fan_mode")) {
+      int mode = j["fan_mode"].get<int>();
+      if (mode != (int)FanControlMode::Auto &&
+          mode != (int)FanControlMode::AppMode)
+        mode = (int)FanControlMode::Auto;
+      m_controlMode = static_cast<FanControlMode>(mode);
+      LogFanEvent("[OMEN] config fan_mode=%d\n", mode);
     }
 
-    if (line.find("\"overlay\"") != std::string::npos) {
-      inOverlay = true;
-      continue;
+    if (j.contains("fan_profile")) {
+      int prof = j["fan_profile"].get<int>();
+      if (prof >= 0 && prof <= 2)
+        m_profile = static_cast<FanControlProfile>(prof);
     }
 
-    if (inOverlay) {
-      auto getVal = [&](const std::string &l) {
-        size_t p = l.find(":");
-        if (p == std::string::npos)
-          return std::string();
-        std::string v = l.substr(p + 1);
-        size_t c = v.find(",");
-        if (c != std::string::npos)
-          v = v.substr(0, c);
-        v.erase(0, v.find_first_not_of(" \t"));
-        v.erase(v.find_last_not_of(" \t") + 1);
-        return v;
+    if (j.contains("power_mode"))
+      PowerControl::Get().SetMode(
+          static_cast<PowerMode>(j["power_mode"].get<int>()));
+
+    if (j.contains("overlay")) {
+      auto &ov = j["overlay"];
+      auto readFloat = [&](const char *key, float &dst) {
+        if (ov.contains(key))
+          dst = ov[key].get<float>();
       };
-      if (line.find("\"show\"") != std::string::npos)
-        m_overlayConfig.show = (line.find("true") != std::string::npos);
-      if (line.find("\"top\"") != std::string::npos)
-        m_overlayConfig.top = (line.find("true") != std::string::npos);
-      if (line.find("\"vertical\"") != std::string::npos)
-        m_overlayConfig.vertical = (line.find("true") != std::string::npos);
-
-      auto readF = [&](const char *key, float &dst) {
-        if (line.find(key) != std::string::npos) {
-          try {
-            dst = std::stof(getVal(line));
-          } catch (...) {
-          }
-        }
+      auto readInt = [&](const char *key, int &dst) {
+        if (ov.contains(key))
+          dst = ov[key].get<int>();
       };
-      readF("\"opacity\"", m_overlayConfig.opacity);
-      readF("\"pos_x\"", m_overlayConfig.posX);
-      readF("\"pos_y\"", m_overlayConfig.posY);
-      readF("\"size_w\"", m_overlayConfig.sizeW);
-      readF("\"size_h\"", m_overlayConfig.sizeH);
-      readF("\"cpu_warn\"", m_overlayConfig.cpuWarn);
-      readF("\"cpu_crit\"", m_overlayConfig.cpuCrit);
-      readF("\"gpu_warn\"", m_overlayConfig.gpuWarn);
-      readF("\"gpu_crit\"", m_overlayConfig.gpuCrit);
-      readF("\"disk_warn\"", m_overlayConfig.diskWarn);
-      readF("\"disk_crit\"", m_overlayConfig.diskCrit);
-      
-      if (line.find("\"preset_idx\"") != std::string::npos) {
-        try { m_overlayConfig.presetIdx = std::stoi(getVal(line)); } catch (...) {}
-      }
-      if (line.find("\"cpu_ppt_cap\"") != std::string::npos) {
-        try {
-          m_overlayConfig.cpuPptCap = std::stoi(getVal(line));
-          PowerControl::Get().SetCpuPowerLimitW(m_overlayConfig.cpuPptCap);
-        } catch (...) {}
-      }
-      if (line.find("\"battery_limit\"") != std::string::npos) {
-        try { m_overlayConfig.batteryLimit = std::stoi(getVal(line)); } catch (...) {}
-      }
-      if (line.find("\"amd_curve_optimizer\"") != std::string::npos) {
-        try { 
-          int val = std::stoi(getVal(line));
-          if (val >= -30 && val <= 30)
-            PowerControl::Get().SetCachedAmdCurveOptimizer(val);
-        } catch (...) {}
+      auto readBool = [&](const char *key, bool &dst) {
+        if (ov.contains(key))
+          dst = ov[key].get<bool>();
+      };
+
+      readBool("show", m_overlayConfig.show);
+      readBool("top", m_overlayConfig.top);
+      readBool("vertical", m_overlayConfig.vertical);
+      readFloat("opacity", m_overlayConfig.opacity);
+      readFloat("pos_x", m_overlayConfig.posX);
+      readFloat("pos_y", m_overlayConfig.posY);
+      readFloat("size_w", m_overlayConfig.sizeW);
+      readFloat("size_h", m_overlayConfig.sizeH);
+      readFloat("cpu_warn", m_overlayConfig.cpuWarn);
+      readFloat("cpu_crit", m_overlayConfig.cpuCrit);
+      readFloat("gpu_warn", m_overlayConfig.gpuWarn);
+      readFloat("gpu_crit", m_overlayConfig.gpuCrit);
+      readFloat("disk_warn", m_overlayConfig.diskWarn);
+      readFloat("disk_crit", m_overlayConfig.diskCrit);
+      readBool("hud_passthrough", m_overlayConfig.hudPassthrough);
+      readBool("log_enabled", m_overlayConfig.logEnabled);
+      readInt("battery_limit", m_overlayConfig.batteryLimit);
+      readInt("main_win_x", m_overlayConfig.mainWinX);
+      readInt("main_win_y", m_overlayConfig.mainWinY);
+      readInt("main_win_w", m_overlayConfig.mainWinW);
+      readInt("main_win_h", m_overlayConfig.mainWinH);
+      readInt("active_tab", m_overlayConfig.activeTab);
+
+      if (ov.contains("minimize_on_close"))
+        m_overlayConfig.minimizeOnClose = ov["minimize_on_close"].get<bool>();
+
+      if (ov.contains("amd_curve_optimizer")) {
+        int val = ov["amd_curve_optimizer"].get<int>();
+        if (val >= -30 && val <= 30)
+          PowerControl::Get().SetCachedAmdCurveOptimizer(val);
       }
     }
+  } catch (...) {
   }
 }
 
 
-static int MapCurve(CurvePoint *points, float temp) {
-  // Current Scale is 40-90 as requested
-
-  if (temp <= points[0].temp)
-    return points[0].speed;
-  if (temp >= points[4].temp)
-    return points[4].speed;
-
-  for (int i = 0; i < 4; i++) {
-    if (temp >= points[i].temp && temp <= points[i + 1].temp) {
-      if (points[i + 1].temp == points[i].temp)
-        return points[i].speed;
-      float t = (temp - points[i].temp) /
-                (float)(points[i + 1].temp - points[i].temp);
-      return (int)(points[i].speed +
-                   t * (points[i + 1].speed - points[i].speed));
+// Primary RPM source: WMI BIOS CMD 0x2D (GetFanLevel V1), which returns real
+// fan levels in krpm units (level 44 = 4400 RPM) and works across thermal
+// policies. The EC RPM registers are unpopulated on this model (GetFan1Speed
+// returns duty*50), so 0x2D is preferred over EC. Command 0x38 (V2) is
+// OMEN Max 2025+ only and fails here.
+static float ReadStableRpm(bool secondFan) {
+  auto &wmi = FanService::WmiRpm();
+  if (wmi.Initialize()) {
+    uint8_t d[4] = {0, 0, 0, 0};
+    std::vector<uint8_t> out;
+    if (wmi.ExecuteHpBiosMethod(0x20008, 0x2D, d, 4, out, 128)) {
+      if (out.size() >= 2) {
+        int f1 = out[0] * 100;
+        int f2 = out[1] * 100;
+        int rpm = secondFan ? f2 : f1;
+        if (rpm >= 0 && rpm <= 8000)
+          return (float)rpm;
+      }
     }
   }
-  return points[4].speed;
+
+  // WMI unavailable/failed — fall back to EC RPM registers (duty*50 estimate).
+  float samples[3] = {};
+  for (float &sample : samples) {
+    sample = secondFan ? OmenEc::Get().GetFan2Speed()
+                       : OmenEc::Get().GetFan1Speed();
+  }
+  std::sort(std::begin(samples), std::end(samples));
+  float median = samples[1];
+  if (median > 0.0f && median <= 10000.0f)
+    return median;
+
+  return -1.0f;
+}
+
+static float RejectRpmJump(float sample, float previous) {
+  if (sample < 0.0f)
+    return previous;
+  if (previous >= 0.0f && previous > 0.0f && sample > 0.0f &&
+      std::abs(sample - previous) > 1000.0f)
+    return previous;
+  return sample;
 }
 
 void FanService::Update() {
@@ -229,8 +212,12 @@ void FanService::Update() {
   if (std::chrono::duration_cast<std::chrono::milliseconds>(nowRpm -
                                                             lastRpmRead)
           .count() >= 1000) {
-    float f1 = OmenEc::Get().GetFan1Speed();
-    float f2 = OmenEc::Get().GetFan2Speed();
+    static float lastRawF1 = -1.0f;
+    static float lastRawF2 = -1.0f;
+    float f1 = RejectRpmJump(ReadStableRpm(false), lastRawF1);
+    float f2 = RejectRpmJump(ReadStableRpm(true), lastRawF2);
+    lastRawF1 = f1;
+    lastRawF2 = f2;
 
     static float smoothF1 = -1, smoothF2 = -1;
     if (smoothF1 < 0) {
@@ -247,11 +234,34 @@ void FanService::Update() {
       m_fan1Rpm = (smoothF1 > 0) ? smoothF1 : 0;
       m_fan2Rpm = (smoothF2 > 0) ? smoothF2 : 0;
     }
+
+    // Telemetry logging (compiled out unless OMEN_TELEMETRY defined)
+    TelemetryService::Get().Update(
+        ThermalService::Get().GetCpuTemp(), ThermalService::Get().GetGpuTemp(),
+        m_fan1Rpm, m_fan2Rpm, ThermalService::Get().GetCpuLoad(),
+        ThermalService::Get().GetGpuLoad(), ThermalService::Get().GetTotalPower());
+
     lastRpmRead = nowRpm;
   }
 
   // 2. Control Logic
   FanControlMode mode = m_controlMode.load();
+  static FanControlMode lastLoggedMode = FanControlMode::Auto;
+  static bool modeWasLogged = false;
+  if (!modeWasLogged || mode != lastLoggedMode) {
+    LogFanEvent("[OMEN] fan_mode active=%d\n", (int)mode);
+    lastLoggedMode = mode;
+    modeWasLogged = true;
+  }
+  if (mode != FanControlMode::Auto && !OmenHal::Get().IsFanControlReady()) {
+    // Never assert manual EC/WMI control until worker COM and WMI are ready.
+    m_controlMode = FanControlMode::Auto;
+    mode = FanControlMode::Auto;
+    LogFanEvent("[OMEN] fan_control readiness_failed mode=%d\n", (int)mode);
+    FanController::Get().RestoreBios();
+    m_lastAppliedFan1 = -1;
+    m_lastAppliedFan2 = -1;
+  }
   static bool firstRun = true;
   if (firstRun) {
     firstRun = false;
@@ -274,10 +284,17 @@ void FanService::Update() {
     if (now - m_lastTargetUpdate >= 2000 || m_lastTargetUpdate == 0) {
       if (mode == FanControlMode::AppMode) {
         float maxTemp = std::max(m_avgCpu, m_avgGpu);
-        int cpuTarget = MapCurve(m_cpuCurve, m_avgCpu);
-        int gpuTarget = MapCurve(m_gpuCurve, m_avgGpu);
-        m_fan1Target = cpuTarget;
-        m_fan2Target = gpuTarget;
+        // Thermal safety: force 100% fan above 90°C regardless of profile.
+        if (maxTemp > 90.0f) {
+          m_fan1Target = 100;
+          m_fan2Target = 100;
+        } else {
+          int cpuTarget = m_pid.Compute(maxTemp, now);
+          m_fan1Target = cpuTarget;
+          m_fan2Target = std::max(m_pid.minSpeed, cpuTarget - 10);
+        }
+        LogFanEvent("[OMEN] fan_targets cpu=%d gpu=%d\n", m_fan1Target,
+                    m_fan2Target);
       }
       m_lastTargetUpdate = now;
     }
@@ -298,8 +315,11 @@ void FanService::Update() {
                              nowHb - lastFullAssert).count() >= 60;
 
     if (ecPingDue) {
-      OmenEc::Get().FanHeartbeat();       // cheap: keep EC control flag alive
-      PowerControl::Get().ExtendFanCountdown();
+      // EC watchdog is reliable on this firmware. WMI command 0x31 fails
+      // consistently while fan-level command 0x2E succeeds, so do not make
+      // active control depend on unsupported countdown renewal.
+      FanController::Get().Heartbeat();
+      LogFanEvent("[OMEN] fan_heartbeat ec_sent=1 wmi_countdown=disabled\n");
       lastEcPing = nowHb;
     }
 
@@ -313,26 +333,26 @@ void FanService::Update() {
 
       if (targetChanged || fullAssertDue) {
         // Full re-assert: EC registers + WMI (defeats BIOS reset)
-        OmenEc::Get().SetFanMode(true);
-        OmenEc::Get().SetFanSpeedPercent(0, m_fan1Target);
-        OmenEc::Get().SetFanSpeedPercent(1, m_fan2Target);
-        PowerControl::Get().SetFanLevelWmiBg(m_fan1Target, m_fan2Target);
+        bool wmiOk = FanController::Get().AssertTargets(m_fan1Target,
+                                                        m_fan2Target);
+        LogFanEvent("[OMEN] fan_write cpu=%d gpu=%d wmi_ok=%d\n",
+                    m_fan1Target, m_fan2Target, wmiOk ? 1 : 0);
+        m_fanControlHealthy = wmiOk;
         m_lastAppliedFan1 = m_fan1Target;
         m_lastAppliedFan2 = m_fan2Target;
         if (fullAssertDue) lastFullAssert = nowHb;
       } else if (ecPingDue) {
         // EC-only ping: re-enforce speed without WMI overhead
-        OmenEc::Get().SetFanMode(true);
-        OmenEc::Get().SetFanSpeedPercent(0, m_fan1Target);
-        OmenEc::Get().SetFanSpeedPercent(1, m_fan2Target);
+        FanController::Get().ReassertEc(m_fan1Target, m_fan2Target);
       }
     }
   } else {
     // Auto Mode
     m_persistenceCounter = 0;
     m_lastTargetUpdate = 0;
-    m_lastAppliedFan1 = -1;
-    m_lastAppliedFan2 = -1;
+      m_lastAppliedFan1 = -1;
+      m_lastAppliedFan2 = -1;
+      m_fanControlHealthy = false;
   }
 }
 
@@ -341,29 +361,27 @@ float FanService::GetFanSpeed(int index) {
   return (index == 0) ? m_fan1Rpm : m_fan2Rpm;
 }
 
-void FanService::SetFanSpeed(int index, int percent) {
-  m_controlMode = FanControlMode::Manual;
-  OmenEc::Get().SetFanMode(true);
-
-  if (index == 0)
-    m_fan1Target = percent;
-  else
-    m_fan2Target = percent;
-
-  OmenEc::Get().SetFanSpeedPercent(index, percent);
-  PowerControl::Get().SetFanLevelWmi(m_fan1Target, m_fan2Target);
-  SaveConfig();
-}
-
 void FanService::SetControlMode(FanControlMode mode) {
-  m_controlMode = mode;
+  FanControlMode normalized = (mode == FanControlMode::AppMode)
+                                  ? FanControlMode::AppMode
+                                  : FanControlMode::Auto;
+  m_controlMode = normalized;
+  LogFanEvent("[OMEN] fan_mode requested=%d\n", (int)normalized);
   SaveConfig();
 }
 
 void FanService::SetFanAuto() {
   m_controlMode = FanControlMode::Auto;
-  OmenEc::Get().RestoreAutoControl();
-  PowerControl::Get().RestoreFanAuto();
+  m_fanControlHealthy = false;
+  LogFanEvent("[OMEN] fan_mode forced=0\n");
+  FanController::Get().RestoreBios();
+  SaveConfig();
+}
+
+void FanService::SetProfile(FanControlProfile profile) {
+  m_profile = profile;
+  m_pid.ApplyPreset(profile);
+  LogFanEvent("[OMEN] fan_profile=%d\n", (int)profile);
   SaveConfig();
 }
 
@@ -371,9 +389,4 @@ float FanService::GetFanPercentage(int index) {
   if (index == 0)
     return (float)m_fan1Target;
   return (float)m_fan2Target;
-}
-
-void FanService::Heartbeat() {
-  if (m_controlMode != FanControlMode::Auto)
-    OmenEc::Get().FanHeartbeat();
 }

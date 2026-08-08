@@ -1,3 +1,0 @@
-*lib:
-%{pg:-lgmon} %{!no-pthread:--whole-archive -Bstatic -lpthread --no-whole-archive -Bdynamic} %{pthread: } %{mwindows:-lgdi32 -lcomdlg32} %{fvtable-verify=preinit:-lvtv -lpsapi;         fvtable-verify=std:-lvtv -lpsapi} -ladvapi32 -lshell32 -luser32 -lkernel32
-

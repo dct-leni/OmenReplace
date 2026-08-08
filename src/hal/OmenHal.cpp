@@ -3,12 +3,15 @@
 #include "OmenEc.h"
 #include "PowerControl.h"
 #include "ThermalService.h"
+#include "FanController.h"
 #include "MemoryService.h"
+#include "OmenLog.h"
 #include <chrono>
-#include <intrin.h>
 #include <algorithm>
-#include <cstring>
+#include <cstdio>
+#include <objbase.h>
 #include <string>
+#include <winreg.h>
 
 OmenHal &OmenHal::Get() {
   static OmenHal instance;
@@ -22,13 +25,19 @@ OmenHal::~OmenHal() { Shutdown(); }
 void OmenHal::Shutdown() {
   if (!m_initialized)
     return;
+
+  OmenLog("[OMEN] Shutdown begin\n");
+  m_fanControlActive = false;
   m_stopWorker = true;
+  m_workerWake.notify_all();
+
   if (m_workerThread.joinable())
     m_workerThread.join();
 
-  // Ensure fans return to BIOS control on app exit without overwriting config
-  OmenEc::Get().RestoreAutoControl();
-  PowerControl::Get().RestoreFanAuto();
+  OmenLog("[OMEN] Shutdown restoring fan control\n");
+  FanController::Get().RestoreBios();
+
+  OmenLog("[OMEN] Shutdown complete\n");
   m_initialized = false;
 }
 
@@ -36,8 +45,13 @@ bool OmenHal::Initialize() {
   if (m_initialized)
     return true;
 
-  if (!OmenEc::Get().Initialize())
+  OmenLog("[OMEN] HAL initialize begin\n");
+
+  if (!OmenEc::Get().Initialize()) {
+    OmenLog("[OMEN] HAL EC initialize failed\n");
     return false;
+  }
+  OmenLog("[OMEN] HAL EC initialize ok\n");
 
   // Trigger initial scans in services
   ThermalService::Get();
@@ -52,60 +66,54 @@ bool OmenHal::Initialize() {
     }
   }
 
-  // CPU ID for name
-  int cpuInfo[4] = {-1};
-  char brand[0x40];
-  memset(brand, 0, sizeof(brand));
-  __cpuid(cpuInfo, 0x80000000);
-  if (cpuInfo[0] >= (int)0x80000004) {
-    __cpuid((int *)(brand), 0x80000002);
-    __cpuid((int *)(brand + 16), 0x80000003);
-    __cpuid((int *)(brand + 32), 0x80000004);
-    m_cpuName = std::string(brand);
-    // Cleanup - remove trailing spaces often present in brand string
-    m_cpuName.erase(m_cpuName.find_last_not_of(" ") + 1);
+  {
+    char buf[256] = {};
+    DWORD sz = sizeof(buf);
+    if (RegGetValueA(HKEY_LOCAL_MACHINE,
+                     "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+                     "ProcessorNameString", RRF_RT_REG_SZ, nullptr, buf,
+                     &sz) == ERROR_SUCCESS &&
+        sz > 0) {
+      m_cpuName = buf;
+      while (!m_cpuName.empty() && m_cpuName.back() == ' ')
+        m_cpuName.pop_back();
+      size_t radeon = m_cpuName.find(" with Radeon");
+      if (radeon != std::string::npos) m_cpuName = m_cpuName.substr(0, radeon);
+    }
+    if (m_cpuName.empty())
+      m_cpuName = "Unknown CPU";
+
+    DISPLAY_DEVICEA dd = {sizeof(dd)};
+    if (EnumDisplayDevicesA(nullptr, 0, &dd, 0)) {
+      m_gpuName = dd.DeviceString;
+      const char* prefixes[] = {"NVIDIA GeForce ", "AMD Radeon ", "Intel "};
+      for (const char* pfx : prefixes) {
+        if (m_gpuName.compare(0, strlen(pfx), pfx) == 0) {
+          m_gpuName = m_gpuName.substr(strlen(pfx));
+          break;
+        }
+      }
+    }
+    if (m_gpuName.empty())
+      m_gpuName = "Unknown GPU";
   }
 
-  // Detect CPU brand
-  if (m_cpuName.find("AMD") != std::string::npos || m_cpuName.find("Ryzen") != std::string::npos) {
-      m_cpuBrand = 1; // AMD
-  } else if (m_cpuName.find("Intel") != std::string::npos) {
-      m_cpuBrand = 2; // Intel
-  }
-
-  // Simple GPU name from Nvidia (if avail) or unknown
-  m_gpuName = "NVIDIA GPU";
-
+  m_stopWorker = false;
+  m_fanControlReady = false;
+  m_fanControlActive = false;
   m_initialized = true;
   m_workerThread = std::thread(&OmenHal::BackgroundLoop, this);
+  OmenLog("[OMEN] HAL worker started\n");
 
   return true;
 }
-
-void OmenHal::Update() {}
 
 int OmenHal::GetBatteryChargeLimit() {
   return PowerControl::Get().GetBatteryChargeLimit();
 }
 
-PowerControl::GpuOverclockSettings OmenHal::GetGpuOverclockSettings() {
-  return PowerControl::Get().GetGpuOverclock();
-}
-
-bool OmenHal::SetGpuOverclock(
-    const PowerControl::GpuOverclockSettings &settings) {
-  return PowerControl::Get().SetGpuOverclock(settings);
-}
-
 bool OmenHal::SetBatteryChargeLimit(int percentage) {
   return PowerControl::Get().SetBatteryChargeLimit(percentage);
-}
-
-int OmenHal::GetCpuCoreOffset() { return PowerControl::Get().GetCpuCoreOffset(); }
-int OmenHal::GetCpuCacheOffset() { return PowerControl::Get().GetCpuCacheOffset(); }
-
-bool OmenHal::SetCpuUndervolt(int coreMv, int cacheMv) {
-  return PowerControl::Get().SetCpuUndervolt(coreMv, cacheMv);
 }
 
 bool OmenHal::SetAmdCurveOptimizer(int coCounts) {
@@ -116,12 +124,20 @@ int OmenHal::GetCachedAmdCurveOptimizer() {
   return PowerControl::Get().GetCachedAmdCurveOptimizer();
 }
 
-void OmenHal::SetCachedAmdCurveOptimizer(int val) {
-  PowerControl::Get().SetCachedAmdCurveOptimizer(val);
-}
-
 int OmenHal::GetAmdCurveOptimizer() {
   return PowerControl::Get().GetAmdCurveOptimizer();
+}
+
+bool OmenHal::SetStapmLimit(int watts) {
+  return PowerControl::Get().SetStapmLimit(watts);
+}
+
+bool OmenHal::GetPowerThermalLimits(int &powerW, int &tempC) {
+  return PowerControl::Get().GetPowerThermalLimits(powerW, tempC);
+}
+
+bool OmenHal::SetTctlTemp(int tempC) {
+  return PowerControl::Get().SetTctlTemp(tempC);
 }
 
 bool OmenHal::GetIsDesktop() { return m_isDesktop; }
@@ -131,6 +147,28 @@ bool OmenHal::GetIsAnotherFanControllerActive() {
 }
 
 void OmenHal::BackgroundLoop() {
+  HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  if (FAILED(comResult)) {
+    char message[128];
+    std::snprintf(message, sizeof(message),
+                  "[OMEN] worker COM initialize failed hr=0x%08lx\n",
+                  (unsigned long)comResult);
+    OmenLog("%s", message);
+    m_fanControlReady = false;
+  } else {
+    char message[128];
+    std::snprintf(message, sizeof(message),
+                  "[OMEN] worker COM initialize ok hr=0x%08lx\n",
+                  (unsigned long)comResult);
+    OmenLog("%s", message);
+    m_fanControlReady = true;
+  }
+
+  if (FanService::Get().GetControlMode() == FanControlMode::AppMode) {
+    m_fanControlActive = true;
+    FanService::Get().SetProfile(FanService::Get().GetProfile());
+  }
+
   int updateCounter = 0;
   while (!m_stopWorker) {
     auto start = std::chrono::steady_clock::now();
@@ -179,13 +217,26 @@ void OmenHal::BackgroundLoop() {
     if (sleepTime < 100)
       sleepTime = 100;
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(sleepTime));
+    std::unique_lock<std::mutex> lock(m_workerWakeMutex);
+    m_workerWake.wait_for(lock, std::chrono::milliseconds(sleepTime),
+                          [this] { return m_stopWorker.load(); });
   }
+
+  m_fanControlReady = false;
+  m_fanControlActive = false;
+  if (SUCCEEDED(comResult))
+    CoUninitialize();
 }
 
 float OmenHal::GetCpuTemp() { return ThermalService::Get().GetCpuTemp(); }
 float OmenHal::GetGpuTemp() { return ThermalService::Get().GetGpuTemp(); }
+float OmenHal::GetRamTemp() { return ThermalService::Get().GetRamTemp(); }
+int OmenHal::GetRamTemps(float &t0, float &t1) {
+  return ThermalService::Get().GetRamTemps(t0, t1);
+}
 float OmenHal::GetTotalPower() { return ThermalService::Get().GetTotalPower(); }
+float OmenHal::GetCpuPower() { return ThermalService::Get().GetCpuPower(); }
+float OmenHal::GetGpuPower() { return ThermalService::Get().GetGpuPower(); }
 float OmenHal::GetCpuLoad() { return ThermalService::Get().GetCpuLoad(); }
 float OmenHal::GetGpuLoad() { return ThermalService::Get().GetGpuLoad(); }
 const std::vector<DriveInfo> &OmenHal::GetDriveTemps() {
@@ -199,15 +250,15 @@ float OmenHal::GetFanPercentage(int fanIndex) {
   return FanService::Get().GetFanPercentage(fanIndex);
 }
 bool OmenHal::GetDriverStatus() { return OmenEc::Get().IsInitialized(); }
-bool OmenHal::GetFanManual() { return FanService::Get().IsManualMode(); }
-
-void OmenHal::SetFanSpeed(int fanIndex, int value) {
-  FanService::Get().SetFanSpeed(fanIndex, value);
-}
 void OmenHal::SetFanAuto() { FanService::Get().SetFanAuto(); }
 
 void OmenHal::SetPowerMode(int mode) {
   PowerControl::Get().SetMode((PowerMode)mode);
+  // Performance mode benefits from the aggressive Cool fan profile.
+  if (mode == (int)PowerMode::Performance || mode == (int)PowerMode::Turbo) {
+    FanService::Get().SetControlMode(FanControlMode::AppMode);
+    FanService::Get().SetProfile(FanControlProfile::Cool);
+  }
   FanService::Get().SaveConfig();
 }
 int OmenHal::GetPowerMode() {
@@ -228,9 +279,5 @@ int OmenHal::GetFanControlMode() {
 void OmenHal::SetFanControlMode(int mode) {
   FanService::Get().SetControlMode((FanControlMode)mode);
 }
-
-void *OmenHal::GetCpuCurve() { return (void *)FanService::Get().GetCpuCurve(); }
-
-void *OmenHal::GetGpuCurve() { return (void *)FanService::Get().GetGpuCurve(); }
 
 void OmenHal::OptimizeMemory() { MemoryService::Get().Optimize(); }

@@ -7,6 +7,7 @@ struct DriveInfo {
     int Index;
     std::string Model;
     int Temperature; // Celsius
+    int Health = 100; // Estimated remaining life %
 };
 
 class SmartHelper {

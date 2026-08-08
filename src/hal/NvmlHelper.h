@@ -1,6 +1,4 @@
 #pragma once
-#include <iostream>
-#include <string>
 #include <windows.h>
 
 
@@ -24,8 +22,6 @@ typedef nvmlReturn_t (*nvmlDeviceGetHandleByIndex_t)(unsigned int index,
 typedef nvmlReturn_t (*nvmlDeviceGetTemperature_t)(nvmlDevice_t device,
                                                    int sensorType,
                                                    unsigned int *temp);
-typedef nvmlReturn_t (*nvmlDeviceGetName_t)(nvmlDevice_t device, char *name,
-                                            unsigned int length);
 typedef nvmlReturn_t (*nvmlDeviceGetPowerUsage_t)(nvmlDevice_t device,
                                                   unsigned int *power);
 typedef nvmlReturn_t (*nvmlDeviceGetUtilizationRates_t)(
@@ -60,8 +56,6 @@ public:
         m_hModule, "nvmlDeviceGetHandleByIndex");
     m_nvmlDeviceGetTemperature = (nvmlDeviceGetTemperature_t)GetProcAddress(
         m_hModule, "nvmlDeviceGetTemperature");
-    m_nvmlDeviceGetName =
-        (nvmlDeviceGetName_t)GetProcAddress(m_hModule, "nvmlDeviceGetName");
     m_nvmlDeviceGetPowerUsage = (nvmlDeviceGetPowerUsage_t)GetProcAddress(
         m_hModule, "nvmlDeviceGetPowerUsage");
     m_nvmlDeviceGetUtilizationRates =
@@ -113,17 +107,6 @@ public:
 
   bool IsInitialized() const { return m_initialized; }
 
-  std::string GetGpuName() {
-    if (!m_initialized)
-      return "NVIDIA GPU";
-    char name[64] = {0};
-    if (m_nvmlDeviceGetName &&
-        m_nvmlDeviceGetName(m_device, name, 64) == NVML_SUCCESS) {
-      return std::string(name);
-    }
-    return "NVIDIA GPU";
-  }
-
 private:
   HMODULE m_hModule = nullptr;
   bool m_initialized = false;
@@ -132,7 +115,6 @@ private:
   nvmlShutdown_t m_nvmlShutdown = nullptr;
   nvmlDeviceGetHandleByIndex_t m_nvmlDeviceGetHandleByIndex = nullptr;
   nvmlDeviceGetTemperature_t m_nvmlDeviceGetTemperature = nullptr;
-  nvmlDeviceGetName_t m_nvmlDeviceGetName = nullptr;
   nvmlDeviceGetPowerUsage_t m_nvmlDeviceGetPowerUsage = nullptr;
   nvmlDeviceGetUtilizationRates_t m_nvmlDeviceGetUtilizationRates = nullptr;
 };

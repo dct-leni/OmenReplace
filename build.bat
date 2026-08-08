@@ -1,35 +1,59 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 
-:: --- Locate MSYS2 MinGW64 toolchain ---
-set "MINGW_BIN=%~dp0external_source\msys64\mingw64\bin"
+set "ROOT=%~dp0"
+if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 
-if not exist "%MINGW_BIN%\g++.exe" (
-    echo ERROR: MinGW-w64 not found at %MINGW_BIN%
-    exit /b 1
+:: Locate MSVC vcvars64.bat (x86 and x64 install roots)
+set "VCTOOLS=%ProgramFiles%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build"
+if exist "%VCTOOLS%\vcvars64.bat" goto :found_vc
+set "VCTOOLS=%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build"
+if exist "%VCTOOLS%\vcvars64.bat" goto :found_vc
+set "VCTOOLS=%ProgramFiles%\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build"
+if exist "%VCTOOLS%\vcvars64.bat" goto :found_vc
+set "VCTOOLS=%ProgramFiles%\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build"
+if exist "%VCTOOLS%\vcvars64.bat" goto :found_vc
+set "VCTOOLS=%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build"
+if exist "%VCTOOLS%\vcvars64.bat" goto :found_vc
+
+echo ERROR: vcvars64.bat not found. Run requirements.bat first.
+exit /b 1
+
+:found_vc
+echo MSVC found: %VCTOOLS%
+
+:: Clean stale build
+if exist "%ROOT%\build" rmdir /s /q "%ROOT%\build"
+
+:: Activate MSVC environment + configure + build
+call "%VCTOOLS%\vcvars64.bat" >nul 2>&1
+if errorlevel 1 (
+  echo vcvars64.bat failed.
+  exit /b 1
 )
 
-set "PATH=%MINGW_BIN%;%PATH%"
-
-if exist build rmdir /s /q build
-mkdir build
-
-echo Configuring with CMake...
-cmake -G "MinGW Makefiles" ^
-  -DCMAKE_MAKE_PROGRAM="%MINGW_BIN%\mingw32-make.exe" ^
-  -DCMAKE_CXX_COMPILER="%MINGW_BIN%\g++.exe" ^
-  -B build
-if %errorlevel% neq 0 (
-    echo Configuration failed!
-    exit /b %errorlevel%
+echo.
+echo Configuring with CMake (Ninja + MSVC)...
+cmake -S "%ROOT%" -B "%ROOT%\build" -G "Ninja" ^
+  -DCMAKE_BUILD_TYPE=Release
+if errorlevel 1 (
+  echo CMake configuration failed.
+  exit /b 1
 )
 
+echo.
 echo Building...
-cmake --build build
-if %errorlevel% neq 0 (
-    echo Build failed!
-    exit /b %errorlevel%
+cmake --build "%ROOT%\build" --config Release
+if errorlevel 1 (
+  echo Build failed.
+  exit /b 1
 )
 
-echo Build successful. Binary generated in output directory.
+echo.
+echo Cleaning stale runtime libs...
+if exist "%ROOT%\output\libs" rmdir /s /q "%ROOT%\output\libs"
+if exist "%ROOT%\output\slint_cpp.dll" del /q "%ROOT%\output\slint_cpp.dll" 2>nul
+
+echo.
+echo Build successful. Binary: output\OmenControl.exe
 exit /b 0

@@ -1,4 +1,7 @@
 #include "PawnIO.h"
+#include "OmenLog.h"
+#include <atomic>
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <vector>

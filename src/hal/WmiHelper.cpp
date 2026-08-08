@@ -1,4 +1,5 @@
 #include "WmiHelper.h"
+#include "OmenLog.h"
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -17,22 +18,25 @@ bool WmiHelper::Initialize(const std::wstring &namespc) {
 
   HRESULT hres;
 
-  // Step 1: Initialize COM. (Caller thread should do this usually, but we
-  // assume it's done or we do it) We do NOT call CoInitialize here as it
-  // depends on threading model of caller.
+  // Caller must initialize COM on this thread before calling Initialize().
 
   // Step 2: Set general COM security levels
   hres =
       CoInitializeSecurity(NULL, -1, NULL, NULL, RPC_C_AUTHN_LEVEL_DEFAULT,
                            RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE, NULL);
-  // Ignore RPC_E_TOO_LATE
+  if (FAILED(hres) && hres != RPC_E_TOO_LATE) {
+    OmenLog("[OMEN] WMI security initialization failed\n");
+    return false;
+  }
 
   // Step 3: Obtain the initial locator to WMI
   hres = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER,
                           IID_IWbemLocator, (LPVOID *)&m_pLoc);
 
-  if (FAILED(hres))
+  if (FAILED(hres)) {
+    OmenLog("[OMEN] WMI locator initialization failed\n");
     return false;
+  }
 
   // Step 4: Connect to WMI
   BSTR path = SysAllocString(namespc.c_str());
@@ -40,6 +44,7 @@ bool WmiHelper::Initialize(const std::wstring &namespc) {
   SysFreeString(path);
 
   if (FAILED(hres)) {
+    OmenLog("[OMEN] WMI namespace connection failed\n");
     m_pLoc->Release();
     m_pLoc = nullptr;
     return false;
@@ -51,12 +56,16 @@ bool WmiHelper::Initialize(const std::wstring &namespc) {
                            NULL, EOAC_NONE);
 
   if (FAILED(hres)) {
+    OmenLog("[OMEN] WMI proxy security initialization failed\n");
     m_pSvc->Release();
     m_pLoc->Release();
+    m_pSvc = nullptr;
+    m_pLoc = nullptr;
     return false;
   }
 
   m_initialized = true;
+  OmenLog("[OMEN] WMI initialize ok\n");
   return true;
 }
 
@@ -156,77 +165,6 @@ bool WmiHelper::ExecQueryAll(const std::wstring &query,
       }
       VariantClear(&vtProp);
     }
-    pclsObj->Release();
-  }
-  pEnumerator->Release();
-  return true;
-}
-
-static float GetFloatState(IWbemClassObject *pclsObj,
-                           const std::wstring &prop) {
-  VARIANT vtProp;
-  VariantInit(&vtProp);
-  if (SUCCEEDED(pclsObj->Get(prop.c_str(), 0, &vtProp, 0, 0))) {
-    float ret = 0.0f;
-    if (vtProp.vt == VT_R4)
-      ret = vtProp.fltVal;
-    else if (vtProp.vt == VT_BSTR && vtProp.bstrVal)
-      ret = (float)_wtof(vtProp.bstrVal);
-    VariantClear(&vtProp);
-    return ret;
-  }
-  return 0.0f;
-}
-
-static std::wstring GetStrState(IWbemClassObject *pclsObj,
-                                const std::wstring &prop) {
-  VARIANT vtProp;
-  VariantInit(&vtProp);
-  if (SUCCEEDED(pclsObj->Get(prop.c_str(), 0, &vtProp, 0, 0))) {
-    std::wstring ret = L"";
-    if (vtProp.vt == VT_BSTR && vtProp.bstrVal)
-      ret = vtProp.bstrVal;
-    VariantClear(&vtProp);
-    return ret;
-  }
-  return L"";
-}
-
-bool WmiHelper::QueryLhmSensors(std::vector<LhmSensorResult> &outSensors) {
-  if (!m_initialized || !m_pSvc)
-    return false;
-
-  IEnumWbemClassObject *pEnumerator = NULL;
-  BSTR lang = SysAllocString(L"WQL");
-  BSTR query =
-      SysAllocString(L"SELECT Name, Identifier, SensorType, Value FROM Sensor");
-
-  HRESULT hres = m_pSvc->ExecQuery(
-      lang, query, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, NULL,
-      &pEnumerator);
-
-  SysFreeString(lang);
-  SysFreeString(query);
-
-  if (FAILED(hres))
-    return false;
-
-  IWbemClassObject *pclsObj = NULL;
-  ULONG uReturn = 0;
-
-  while (pEnumerator) {
-    hres = pEnumerator->Next(WBEM_INFINITE, 1, &pclsObj, &uReturn);
-    if (0 == uReturn)
-      break;
-
-    LhmSensorResult obj;
-    obj.Name = GetStrState(pclsObj, L"Name");
-    obj.Identifier = GetStrState(pclsObj, L"Identifier");
-    obj.SensorType = GetStrState(pclsObj, L"SensorType");
-    obj.Value = GetFloatState(pclsObj, L"Value");
-
-    outSensors.push_back(obj);
-
     pclsObj->Release();
   }
   pEnumerator->Release();
