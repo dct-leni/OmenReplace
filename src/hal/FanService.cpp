@@ -46,35 +46,27 @@ FanService::FanService() {
 
 void FanService::SaveConfig() {
   nlohmann::json j;
+  j["power_mode"] = (int)PowerControl::Get().GetCurrentMode();
   j["fan_mode"] = (int)m_controlMode.load();
   j["fan_profile"] = (int)m_profile.load();
-  j["power_mode"] = (int)PowerControl::Get().GetCurrentMode();
+  j["amd_curve_optimizer"] = PowerControl::Get().GetCachedAmdCurveOptimizer();
+  j["battery_limit"] = m_overlayConfig.batteryLimit;
+  j["minimize_on_close"] = m_overlayConfig.minimizeOnClose;
 
-  nlohmann::json &ov = j["overlay"];
-  ov["show"] = m_overlayConfig.show;
-  ov["top"] = m_overlayConfig.top;
-  ov["vertical"] = m_overlayConfig.vertical;
-  ov["opacity"] = m_overlayConfig.opacity;
-  ov["pos_x"] = m_overlayConfig.posX;
-  ov["pos_y"] = m_overlayConfig.posY;
-  ov["size_w"] = m_overlayConfig.sizeW;
-  ov["size_h"] = m_overlayConfig.sizeH;
-  ov["cpu_warn"] = m_overlayConfig.cpuWarn;
-  ov["cpu_crit"] = m_overlayConfig.cpuCrit;
-  ov["gpu_warn"] = m_overlayConfig.gpuWarn;
-  ov["gpu_crit"] = m_overlayConfig.gpuCrit;
-  ov["disk_warn"] = m_overlayConfig.diskWarn;
-  ov["disk_crit"] = m_overlayConfig.diskCrit;
-  ov["battery_limit"] = m_overlayConfig.batteryLimit;
-  ov["hud_passthrough"] = m_overlayConfig.hudPassthrough;
-  ov["log_enabled"] = m_overlayConfig.logEnabled;
-  ov["amd_curve_optimizer"] = PowerControl::Get().GetCachedAmdCurveOptimizer();
-  ov["main_win_x"] = m_overlayConfig.mainWinX;
-  ov["main_win_y"] = m_overlayConfig.mainWinY;
-  ov["main_win_w"] = m_overlayConfig.mainWinW;
-  ov["main_win_h"] = m_overlayConfig.mainWinH;
-  ov["active_tab"] = m_overlayConfig.activeTab;
-  ov["minimize_on_close"] = m_overlayConfig.minimizeOnClose;
+  nlohmann::json &hud = j["hud"];
+  hud["show"] = m_overlayConfig.show;
+  hud["passthrough"] = m_overlayConfig.hudPassthrough;
+  hud["opacity"] = (float)(std::round(m_overlayConfig.opacity * 100.0f) / 100.0f);
+  hud["pos_x"] = (int)std::round(m_overlayConfig.posX);
+  hud["pos_y"] = (int)std::round(m_overlayConfig.posY);
+  hud["size_w"] = (int)std::round(m_overlayConfig.sizeW);
+  hud["size_h"] = (int)std::round(m_overlayConfig.sizeH);
+
+  nlohmann::json &api = j["api"];
+  api["enabled"] = m_overlayConfig.apiEnabled;
+  api["port"] = m_overlayConfig.apiPort;
+  api["bind_all"] = m_overlayConfig.apiBindAll;
+  api["token"] = m_overlayConfig.apiToken;
 
   std::ofstream f(ConfigPath());
   if (f.is_open())
@@ -108,52 +100,53 @@ void FanService::LoadConfig() {
       PowerControl::Get().SetMode(
           static_cast<PowerMode>(j["power_mode"].get<int>()));
 
-    if (j.contains("overlay")) {
-      auto &ov = j["overlay"];
-      auto readFloat = [&](const char *key, float &dst) {
-        if (ov.contains(key))
-          dst = ov[key].get<float>();
-      };
-      auto readInt = [&](const char *key, int &dst) {
-        if (ov.contains(key))
-          dst = ov[key].get<int>();
-      };
-      auto readBool = [&](const char *key, bool &dst) {
-        if (ov.contains(key))
-          dst = ov[key].get<bool>();
-      };
+    if (j.contains("battery_limit"))
+      m_overlayConfig.batteryLimit = j["battery_limit"].get<int>();
 
-      readBool("show", m_overlayConfig.show);
-      readBool("top", m_overlayConfig.top);
-      readBool("vertical", m_overlayConfig.vertical);
-      readFloat("opacity", m_overlayConfig.opacity);
-      readFloat("pos_x", m_overlayConfig.posX);
-      readFloat("pos_y", m_overlayConfig.posY);
-      readFloat("size_w", m_overlayConfig.sizeW);
-      readFloat("size_h", m_overlayConfig.sizeH);
-      readFloat("cpu_warn", m_overlayConfig.cpuWarn);
-      readFloat("cpu_crit", m_overlayConfig.cpuCrit);
-      readFloat("gpu_warn", m_overlayConfig.gpuWarn);
-      readFloat("gpu_crit", m_overlayConfig.gpuCrit);
-      readFloat("disk_warn", m_overlayConfig.diskWarn);
-      readFloat("disk_crit", m_overlayConfig.diskCrit);
-      readBool("hud_passthrough", m_overlayConfig.hudPassthrough);
-      readBool("log_enabled", m_overlayConfig.logEnabled);
-      readInt("battery_limit", m_overlayConfig.batteryLimit);
-      readInt("main_win_x", m_overlayConfig.mainWinX);
-      readInt("main_win_y", m_overlayConfig.mainWinY);
-      readInt("main_win_w", m_overlayConfig.mainWinW);
-      readInt("main_win_h", m_overlayConfig.mainWinH);
-      readInt("active_tab", m_overlayConfig.activeTab);
+    if (j.contains("minimize_on_close"))
+      m_overlayConfig.minimizeOnClose = j["minimize_on_close"].get<bool>();
 
-      if (ov.contains("minimize_on_close"))
-        m_overlayConfig.minimizeOnClose = ov["minimize_on_close"].get<bool>();
+    if (j.contains("amd_curve_optimizer")) {
+      int val = j["amd_curve_optimizer"].get<int>();
+      if (val >= -30 && val <= 30)
+        PowerControl::Get().SetCachedAmdCurveOptimizer(val);
+    }
 
-      if (ov.contains("amd_curve_optimizer")) {
-        int val = ov["amd_curve_optimizer"].get<int>();
+    // Modern "hud" section with fallback to legacy "overlay"
+    const char *hudKey = j.contains("hud") ? "hud" : (j.contains("overlay") ? "overlay" : nullptr);
+    if (hudKey) {
+      auto &h = j[hudKey];
+      if (h.contains("show")) m_overlayConfig.show = h["show"].get<bool>();
+      if (h.contains("passthrough")) m_overlayConfig.hudPassthrough = h["passthrough"].get<bool>();
+      else if (h.contains("hud_passthrough")) m_overlayConfig.hudPassthrough = h["hud_passthrough"].get<bool>();
+      if (h.contains("opacity")) m_overlayConfig.opacity = h["opacity"].get<float>();
+      if (h.contains("pos_x")) m_overlayConfig.posX = h["pos_x"].get<float>();
+      if (h.contains("pos_y")) m_overlayConfig.posY = h["pos_y"].get<float>();
+      if (h.contains("size_w")) m_overlayConfig.sizeW = h["size_w"].get<float>();
+      if (h.contains("size_h")) m_overlayConfig.sizeH = h["size_h"].get<float>();
+
+      // Legacy fallbacks if nested inside overlay
+      if (!j.contains("battery_limit") && h.contains("battery_limit"))
+        m_overlayConfig.batteryLimit = h["battery_limit"].get<int>();
+      if (!j.contains("minimize_on_close") && h.contains("minimize_on_close"))
+        m_overlayConfig.minimizeOnClose = h["minimize_on_close"].get<bool>();
+      if (!j.contains("amd_curve_optimizer") && h.contains("amd_curve_optimizer")) {
+        int val = h["amd_curve_optimizer"].get<int>();
         if (val >= -30 && val <= 30)
           PowerControl::Get().SetCachedAmdCurveOptimizer(val);
       }
+    }
+
+    if (j.contains("api")) {
+      auto &api = j["api"];
+      if (api.contains("enabled"))
+        m_overlayConfig.apiEnabled = api["enabled"].get<bool>();
+      if (api.contains("port"))
+        m_overlayConfig.apiPort = api["port"].get<int>();
+      if (api.contains("bind_all"))
+        m_overlayConfig.apiBindAll = api["bind_all"].get<bool>();
+      if (api.contains("token"))
+        m_overlayConfig.apiToken = api["token"].get<std::string>();
     }
   } catch (...) {
   }

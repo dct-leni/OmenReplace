@@ -34,6 +34,8 @@ private:
   int m_coTrackX0, m_coTrackX1, m_coTrackY;
   int m_opacityTrackX0, m_opacityTrackX1, m_opacityTrackY;
   int m_btnFlush[4];
+  int m_btnCoMinus[4]; // [y0,y1,x0,x1]
+  int m_btnCoPlus[4];  // [y0,y1,x0,x1]
   int m_chk[5][4];  // [slot][y0,y1,x0,x1]: battery, autostart, minimize, showhud, passive
 
   HWND m_hwnd = nullptr;
@@ -42,6 +44,7 @@ private:
   bool m_draggingSlider = false; // dragging CO or opacity track
   int m_dragTrack = 0;           // 1 = CO, 2 = opacity
   int m_previewCo = 0;           // CO preview during drag (not yet applied)
+  int m_flushFeedbackTicks = 0;  // > 0 while showing "Flushed!" feedback
   HFONT m_boldFont = nullptr;
   HFONT m_normFont = nullptr;
   HFONT m_smallFont = nullptr;

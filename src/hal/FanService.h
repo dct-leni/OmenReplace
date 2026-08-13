@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <string>
 
 enum class FanControlMode { Auto = 0, AppMode = 2 };
 enum class FanControlProfile { Default = 0, Quiet = 1, Cool = 2 };
@@ -26,32 +27,24 @@ public:
   void SetProfile(FanControlProfile profile);
 
   struct OverlayConfig {
+    // HUD overlay settings
     bool show = false;
-    bool top = false;
-    bool vertical = false;
-    float opacity = 0.9f;
+    bool hudPassthrough = true;
+    float opacity = 0.8f;
     float posX = 100.0f;
     float posY = 100.0f;
     float sizeW = 180.0f;
-    float sizeH = 110.0f;
-    // Temperature thresholds (orange / red)
-    float cpuWarn = 70.0f;
-    float cpuCrit = 80.0f;
-    float gpuWarn = 60.0f;
-    float gpuCrit = 80.0f;
-    float diskWarn = 50.0f;
-    float diskCrit = 60.0f;
-    int batteryLimit = 100;
-    bool hudPassthrough = true;
+    float sizeH = 135.0f;
+    // System settings
+    int batteryLimit = 80;
     bool minimizeOnClose = true;
-    bool logEnabled = false; // write omen_control.log (off by default)
-    int mainWinX = 100;
-    int mainWinY = 100;
-    int mainWinW = 680;
-    int mainWinH = 440;
-    int activeTab = 0;
+    bool logEnabled = false;
+    // Embedded API configuration
+    bool apiEnabled = true;
+    int apiPort = 8080;
+    bool apiBindAll = false;
+    std::string apiToken = "";
   };
-
 
   OverlayConfig &GetOverlayConfig() { return m_overlayConfig; }
 

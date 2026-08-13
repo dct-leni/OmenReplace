@@ -14,13 +14,12 @@
 #include "HudWindow.h"
 
 #pragma comment(lib, "dwmapi.lib")
-
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 
 namespace {
 constexpr int kWidth = 306;
-constexpr int kHeight = 705;
+constexpr int kHeight = 735;
 constexpr int kCardPad = 8;
 constexpr int kRowH = 22;
 
@@ -76,7 +75,7 @@ void MainWindowWin32::RegisterClassOnce() {
   wc.lpfnWndProc = WndProc;
   wc.hInstance = GetModuleHandleW(nullptr);
   wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-  wc.hbrBackground = CreateSolidBrush(RGB(14, 14, 18));
+  wc.hbrBackground = CreateSolidBrush(RGB(8, 8, 12));
   // omen_icon.ico (resource ID 1) for title bar, taskbar and task manager.
   wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(1));
   wc.hIconSm = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(1));
@@ -94,7 +93,7 @@ void MainWindowWin32::Show() {
     if (!m_hwnd) return;
   }
   OmenLog("[OMEN] win32 main window show hwnd=%p\n", m_hwnd);
-  // Dark title bar (matches the Slint dark theme).
+  // Dark title bar (matches the dark theme).
   BOOL dark = TRUE;
   DwmSetWindowAttribute(m_hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark,
                         sizeof(dark));
@@ -103,15 +102,15 @@ void MainWindowWin32::Show() {
   m_timerId = SetTimer(m_hwnd, 1, 2000, nullptr);
   m_boldFont = CreateFontW(-15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                           CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                           CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                            DEFAULT_PITCH, L"Segoe UI");
   m_normFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                           CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                           CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                            DEFAULT_PITCH, L"Segoe UI");
   m_smallFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                            CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                             DEFAULT_PITCH, L"Segoe UI");
 }
 
@@ -157,7 +156,6 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
   case WM_TIMER:
     if (self) {
       self->OnTimer();
-      InvalidateRect(hwnd, nullptr, FALSE);
     }
     return 0;
   case WM_LBUTTONDOWN:
@@ -179,9 +177,91 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
       ReleaseCapture();
     }
     return 0;
+  case WM_SETCURSOR: {
+    if (LOWORD(lp) == HTCLIENT && self) {
+      POINT pt;
+      GetCursorPos(&pt);
+      ScreenToClient(hwnd, &pt);
+      int x = pt.x, y = pt.y;
+      bool isInteractive = false;
+
+      // Power pills
+      for (int i = 0; i < 3; i++) {
+        if (x >= self->m_powerPill[i][2] && x <= self->m_powerPill[i][3] &&
+            y >= self->m_powerPill[i][0] && y <= self->m_powerPill[i][1]) {
+          isInteractive = true; break;
+        }
+      }
+      // Fan pills
+      if (!isInteractive) {
+        for (int i = 0; i < 4; i++) {
+          if (x >= self->m_fanPill[i][2] && x <= self->m_fanPill[i][3] &&
+              y >= self->m_fanPill[i][0] && y <= self->m_fanPill[i][1]) {
+            isInteractive = true; break;
+          }
+        }
+      }
+      // GPU MUX pills
+      if (!isInteractive) {
+        for (int i = 0; i < 2; i++) {
+          if (x >= self->m_muxPill[i][2] && x <= self->m_muxPill[i][3] &&
+              y >= self->m_muxPill[i][0] && y <= self->m_muxPill[i][1]) {
+            isInteractive = true; break;
+          }
+        }
+      }
+      // PBO steppers & track
+      if (!isInteractive) {
+        if ((x >= self->m_btnCoMinus[2] && x <= self->m_btnCoMinus[3] &&
+             y >= self->m_btnCoMinus[0] && y <= self->m_btnCoMinus[1]) ||
+            (x >= self->m_btnCoPlus[2] && x <= self->m_btnCoPlus[3] &&
+             y >= self->m_btnCoPlus[0] && y <= self->m_btnCoPlus[1]) ||
+            (x >= self->m_coTrackX0 && x <= self->m_coTrackX1 &&
+             y >= self->m_coTrackY - 10 && y <= self->m_coTrackY + 10)) {
+          isInteractive = true;
+        }
+      }
+      // Opacity track
+      if (!isInteractive) {
+        if (x >= self->m_opacityTrackX0 && x <= self->m_opacityTrackX1 &&
+            y >= self->m_opacityTrackY - 10 && y <= self->m_opacityTrackY + 10) {
+          isInteractive = true;
+        }
+      }
+      // Toggle switches
+      if (!isInteractive) {
+        for (int i = 0; i < 5; i++) {
+          if (x >= self->m_chk[i][2] && x <= self->m_chk[i][3] &&
+              y >= self->m_chk[i][0] && y <= self->m_chk[i][1]) {
+            isInteractive = true; break;
+          }
+        }
+      }
+      // Flush button
+      if (!isInteractive) {
+        if (x >= self->m_btnFlush[2] && x <= self->m_btnFlush[3] &&
+            y >= self->m_btnFlush[0] && y <= self->m_btnFlush[1]) {
+          isInteractive = true;
+        }
+      }
+
+      if (isInteractive) {
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        return TRUE;
+      }
+    }
+    break;
+  }
+  case WM_APP + 99:
+    if (self) {
+      if (self->m_timerId) { KillTimer(hwnd, self->m_timerId); self->m_timerId = 0; }
+      self->m_destroyed = true;
+    }
+    DestroyWindow(hwnd);
+    return 0;
   case WM_DESTROY:
     if (self) {
-      if (self->m_timerId) KillTimer(hwnd, self->m_timerId);
+      if (self->m_timerId) { KillTimer(hwnd, self->m_timerId); self->m_timerId = 0; }
       self->m_destroyed = true;
     }
     PostQuitMessage(0);
@@ -203,7 +283,12 @@ MainWindowWin32::Card MainWindowWin32::LayoutCard(int y,
   return {y + 24, kRowH}; // placeholder; actual drawing in OnPaint
 }
 
-void MainWindowWin32::OnTimer() { InvalidateRect(m_hwnd, nullptr, FALSE); }
+void MainWindowWin32::OnTimer() {
+  if (m_flushFeedbackTicks > 0) {
+    m_flushFeedbackTicks--;
+  }
+  InvalidateRect(m_hwnd, nullptr, FALSE);
+}
 
 void MainWindowWin32::OnLButtonDown(int x, int y) {
   // Power mode pills.
@@ -238,6 +323,27 @@ void MainWindowWin32::OnLButtonDown(int x, int y) {
       return;
     }
   }
+
+  // AMD CO [-] / [+] Stepper Buttons
+  if (x >= m_btnCoMinus[2] && x <= m_btnCoMinus[3] &&
+      y >= m_btnCoMinus[0] && y <= m_btnCoMinus[1]) {
+    int co = OmenHal::Get().GetCachedAmdCurveOptimizer();
+    int val = std::clamp(co - 1, -30, 0);
+    OmenHal::Get().SetAmdCurveOptimizer(val);
+    FanService::Get().SaveConfig();
+    InvalidateRect(m_hwnd, nullptr, FALSE);
+    return;
+  }
+  if (x >= m_btnCoPlus[2] && x <= m_btnCoPlus[3] &&
+      y >= m_btnCoPlus[0] && y <= m_btnCoPlus[1]) {
+    int co = OmenHal::Get().GetCachedAmdCurveOptimizer();
+    int val = std::clamp(co + 1, -30, 0);
+    OmenHal::Get().SetAmdCurveOptimizer(val);
+    FanService::Get().SaveConfig();
+    InvalidateRect(m_hwnd, nullptr, FALSE);
+    return;
+  }
+
   // AMD CO track: preview while dragging, apply on mouse release.
   if (x >= m_coTrackX0 && x <= m_coTrackX1 && y >= m_coTrackY - 8 &&
       y <= m_coTrackY + 8) {
@@ -276,7 +382,7 @@ void MainWindowWin32::OnLButtonDown(int x, int y) {
     InvalidateRect(m_hwnd, nullptr, FALSE);
     return;
   }
-  // Checkboxes: battery, autostart, minimize, showhud, passive.
+  // Checkboxes / Toggle Switches: battery, autostart, minimize, showhud, passive.
   for (int i = 0; i < 5; i++) {
     if (x >= m_chk[i][2] && x <= m_chk[i][3] && y >= m_chk[i][0] &&
         y <= m_chk[i][1]) {
@@ -326,6 +432,8 @@ void MainWindowWin32::OnLButtonDown(int x, int y) {
       y <= m_btnFlush[1]) {
     PowerControl::Get().FlushMemoryWorkingSet();
     OmenHal::Get().OptimizeMemory();
+    m_flushFeedbackTicks = 2; // show feedback for 2 update cycles
+    InvalidateRect(m_hwnd, nullptr, FALSE);
   }
   InvalidateRect(m_hwnd, nullptr, FALSE);
 }
@@ -339,27 +447,25 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   HBITMAP bmp = CreateCompatibleBitmap(hdc, w, h);
   HGDIOBJ oldBmp = SelectObject(mem, bmp);
 
-  // Background (matches card color, no visible black border).
-  FillRect(mem, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
-  {
-    HBRUSH bg = CreateSolidBrush(RGB(14, 14, 18));
-    FillRect(mem, &rc, bg);
-    DeleteObject(bg);
-  }
+  // Background: Deep Obsidian #08080c (RGB 8, 8, 12)
+  HBRUSH bg = CreateSolidBrush(RGB(8, 8, 12));
+  FillRect(mem, &rc, bg);
+  DeleteObject(bg);
 
   SetBkMode(mem, TRANSPARENT);
 
   auto cardBg = [&](int y, int cardH) {
     RECT c = { kCardPad, y, w - kCardPad, y + cardH };
-    // Rounded card like Slint (bg #0e0e12, subtle border).
-    HBRUSH b = CreateSolidBrush(RGB(14, 14, 18));
+    // Elevated card background: #121218 (RGB 18, 18, 24)
+    HBRUSH b = CreateSolidBrush(RGB(18, 18, 24));
     HGDIOBJ old = SelectObject(mem, b);
     RoundRect(mem, c.left, c.top, c.right, c.bottom, 12, 12);
     SelectObject(mem, old);
     DeleteObject(b);
-    // Stroke a 1px rounded border.
+
+    // Stroke a 1px subtle rounded border: #242430 (RGB 36, 36, 48)
     HBRUSH nb = (HBRUSH)GetStockObject(NULL_BRUSH);
-    HPEN p = CreatePen(PS_SOLID, 1, RGB(38, 38, 46));
+    HPEN p = CreatePen(PS_SOLID, 1, RGB(36, 36, 48));
     old = SelectObject(mem, nb);
     HGDIOBJ oldPen = SelectObject(mem, p);
     RoundRect(mem, c.left, c.top, c.right, c.bottom, 12, 12);
@@ -367,10 +473,11 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     SelectObject(mem, old);
     DeleteObject(p);
   };
+
   auto cardTitle = [&](int y, const wchar_t *t) {
-    RECT tr = { kCardPad + 10, y, w - kCardPad - 10, y + 22 };
+    RECT tr = { kCardPad + 12, y, w - kCardPad - 12, y + 22 };
     SelectObject(mem, m_normFont);
-    SetTextColor(mem, RGB(230, 230, 230));
+    SetTextColor(mem, RGB(240, 240, 245));
     DrawTextW(mem, t, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   };
 
@@ -389,9 +496,9 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   PowerControl::Get().GetSystemRamUsage(ramUsed, ramTotal, ramPct);
 
   auto tempColor = [](float t) {
-    if (t > 85) return RGB(230, 50, 50);    // #e63232
-    if (t > 75) return RGB(230, 200, 50);   // #e6c832
-    return RGB(56, 161, 105);               // #38a169
+    if (t > 85) return RGB(230, 50, 50);    // Red
+    if (t > 75) return RGB(230, 200, 50);   // Amber
+    return RGB(56, 161, 105);               // Green
   };
   auto ramColor = [](float t) {
     if (t > 70) return RGB(230, 50, 50);
@@ -406,28 +513,36 @@ void MainWindowWin32::OnPaint(HDC hdc) {
 
   auto metricRow = [&](int y, const wchar_t *label, const wchar_t *value,
                        COLORREF vc, float load) {
-    RECT lr = { kCardPad + 10, y, kCardPad + 110, y + kRowH };
+    RECT lr = { kCardPad + 12, y, kCardPad + 110, y + kRowH };
     SelectObject(mem, m_normFont);
-    SetTextColor(mem, RGB(230, 230, 230));
+    SetTextColor(mem, RGB(235, 235, 240));
     DrawTextW(mem, label, -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    RECT vr = { kCardPad + 110, y, w - kCardPad - 10, y + kRowH };
+    RECT vr = { kCardPad + 110, y, w - kCardPad - 12, y + kRowH };
     SetTextColor(mem, vc);
     DrawTextW(mem, value, -1, &vr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
-    // Regular load bar (red #8b262a like the pill buttons, dark track).
-    // Small gap (2px) below the text row so text and bar don't overlap.
+    // 4px height rounded load bar
     int barY = y + kRowH + 2;
-    RECT tr = { kCardPad + 10, barY, w - kCardPad - 10, barY + 3 };
-    HBRUSH tb = CreateSolidBrush(RGB(38, 38, 44));
-    FillRect(mem, &tr, tb);
+    RECT tr = { kCardPad + 12, barY, w - kCardPad - 12, barY + 4 };
+    HBRUSH tb = CreateSolidBrush(RGB(28, 28, 36));
+    HGDIOBJ oldTb = SelectObject(mem, tb);
+    RoundRect(mem, tr.left, tr.top, tr.right, tr.bottom, 4, 4);
+    SelectObject(mem, oldTb);
     DeleteObject(tb);
-    int fillW = (int)((float)(tr.right - tr.left) *
-                      std::clamp(load / 100.0f, 0.0f, 1.0f));
+
+    float ratio = std::clamp(load / 100.0f, 0.0f, 1.0f);
+    int fillW = (int)((float)(tr.right - tr.left) * ratio);
     if (fillW > 0) {
       RECT fr = { tr.left, tr.top, tr.left + fillW, tr.bottom };
-      HBRUSH fb = CreateSolidBrush(RGB(139, 38, 42));
-      FillRect(mem, &fr, fb);
+      COLORREF barColor = RGB(139, 38, 42);
+      if (load > 85.0f) barColor = RGB(230, 50, 50);
+      else if (load > 70.0f) barColor = RGB(230, 180, 40);
+
+      HBRUSH fb = CreateSolidBrush(barColor);
+      HGDIOBJ oldFb = SelectObject(mem, fb);
+      RoundRect(mem, fr.left, fr.top, std::max(fr.left + 4, fr.right), fr.bottom, 4, 4);
+      SelectObject(mem, oldFb);
       DeleteObject(fb);
     }
   };
@@ -437,8 +552,8 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     int gap = 0;
     int pw = (x1 - x0 - (count - 1) * gap) / count;
     int ph = 26;
-    // Slint PillTrack: track #18181f, active #8b262a, gray text, rounded 4px.
-    HBRUSH tb = CreateSolidBrush(RGB(24, 24, 31));
+    // Track #181820, active #8b262a, rounded 8px
+    HBRUSH tb = CreateSolidBrush(RGB(24, 24, 32));
     HGDIOBJ oldTb = SelectObject(mem, tb);
     RoundRect(mem, x0, y, x1, y + ph, 8, 8);
     SelectObject(mem, oldTb);
@@ -457,7 +572,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
         SelectObject(mem, old);
         DeleteObject(b);
       }
-      SetTextColor(mem, i == active ? RGB(255, 255, 255) : RGB(142, 142, 147));
+      SetTextColor(mem, i == active ? RGB(255, 255, 255) : RGB(154, 154, 162));
       SelectObject(mem, m_normFont);
       RECT pr = { px0, y, px1, y + ph };
       DrawTextW(mem, labels[i], -1, &pr,
@@ -465,28 +580,44 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     }
   };
 
-  auto checkBox = [&](int y, const wchar_t *label, bool on, int slot) {
-    // 16x16 box (red when checked, like the pill buttons).
-    RECT br = { kCardPad + 10, y + 3, kCardPad + 26, y + 19 };
-    HBRUSH b = CreateSolidBrush(on ? RGB(139, 38, 42) : RGB(38, 38, 44));
-    FillRect(mem, &br, b);
-    DeleteObject(b);
-    if (on) {
-      SetTextColor(mem, RGB(255, 255, 255));
-      SelectObject(mem, m_boldFont);
-      DrawTextW(mem, L"\u2713", -1, &br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
-    RECT tr = { kCardPad + 32, y, w - kCardPad - 10, y + kRowH };
-    SetTextColor(mem, RGB(230, 230, 230));
+  // Modern Toggle Switch
+  auto toggleSwitch = [&](int y, const wchar_t *label, bool on, int slot) {
+    int swW = 34, swH = 18;
+    int swX = w - kCardPad - 12 - swW;
+    int swY = y + (kRowH - swH) / 2;
+
+    // Label on left
+    RECT tr = { kCardPad + 12, y, swX - 8, y + kRowH };
+    SetTextColor(mem, RGB(235, 235, 240));
     SelectObject(mem, m_normFont);
     DrawTextW(mem, label, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    // Switch track
+    RECT sr = { swX, swY, swX + swW, swY + swH };
+    HBRUSH tb = CreateSolidBrush(on ? RGB(139, 38, 42) : RGB(36, 36, 46));
+    HGDIOBJ oldTb = SelectObject(mem, tb);
+    RoundRect(mem, sr.left, sr.top, sr.right, sr.bottom, 18, 18);
+    SelectObject(mem, oldTb);
+    DeleteObject(tb);
+
+    // Switch circular thumb (14px diameter)
+    int thumbD = 14;
+    int thumbX = on ? (swX + swW - thumbD - 2) : (swX + 2);
+    int thumbY = swY + 2;
+    HBRUSH thb = CreateSolidBrush(RGB(255, 255, 255));
+    HGDIOBJ oldThb = SelectObject(mem, thb);
+    Ellipse(mem, thumbX, thumbY, thumbX + thumbD, thumbY + thumbD);
+    SelectObject(mem, oldThb);
+    DeleteObject(thb);
+
+    // Hit box (entire row)
     m_chk[slot][0] = y;
     m_chk[slot][1] = y + kRowH;
     m_chk[slot][2] = kCardPad + 10;
     m_chk[slot][3] = w - kCardPad - 10;
   };
 
-  // === Header: power on top, CPU/GPU names below (matches Slint) ===
+  // === Header: power on top, CPU/GPU names below ===
   int y = 8;
   {
     wchar_t powerBuf[64];
@@ -494,7 +625,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
                   L"C:%.0fW | G:%.0fW | %.0fW", cpuP, gpuP,
                   total > 0 ? total : 0.0f);
     RECT hr = { kCardPad, y, w - kCardPad, y + 14 };
-    SetTextColor(mem, RGB(230, 230, 230));
+    SetTextColor(mem, RGB(240, 240, 245));
     SelectObject(mem, m_smallFont);
     DrawTextW(mem, powerBuf, -1, &hr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   }
@@ -507,7 +638,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
                   hal.GetGpuName().c_str());
     wcscat_s(hwBuf, gpuBuf);
     RECT hr = { kCardPad, y, w - kCardPad, y + 13 };
-    SetTextColor(mem, RGB(140, 140, 147));
+    SetTextColor(mem, RGB(154, 154, 162));
     SelectObject(mem, m_smallFont);
     DrawTextW(mem, hwBuf, -1, &hr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   }
@@ -518,7 +649,6 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   int diskCount = (int)std::min<size_t>(drives.size(), 3);
 
   // === Card 1: Telemetry ===
-  // Content: title 26 + CPU/GPU/RAM rows (28 each) + Fans (34) + disks (28 each) + trailing 8.
   int telemetryH = 26 + 28 + 28 + 28 + 34 + diskCount * 28 + 8;
   cardBg(y, telemetryH);
   cardTitle(y, L"Telemetry");
@@ -546,13 +676,12 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   y += kRowH + 6;
   auto rpmfn = [](float v) { return (int)((int)(v / 100.0f) * 100); };
   std::swprintf(buf, sizeof(buf), L"%d / %d RPM", rpmfn(fan1), rpmfn(fan2));
-  metricRow(y, L"Fans", buf, RGB(230, 230, 230), 0);
+  metricRow(y, L"Fans", buf, RGB(235, 235, 240), 0);
   y += kRowH + 12;
 
   // Disks.
   for (size_t i = 0; i < drives.size() && i < 3; i++) {
     std::string model = drives[i].Model;
-    // Strip common vendor/marketing words to fit the full model name.
     auto strip = [&model](const std::string &word) {
       size_t p = model.find(word);
       while (p != std::string::npos) {
@@ -567,31 +696,31 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     while (!model.empty() && model[0] == ' ') model.erase(0, 1);
     std::string label = model + " [" + std::to_string(drives[i].Health) + "%]";
     std::wstring wlabel(label.begin(), label.end());
-    int labelEnd = w - kCardPad - 10 - 80; // leave room for temp value
-    RECT lr = { kCardPad + 10, y, labelEnd, y + kRowH };
+    int labelEnd = w - kCardPad - 12 - 80;
+    RECT lr = { kCardPad + 12, y, labelEnd, y + kRowH };
     SelectObject(mem, m_normFont);
-    SetTextColor(mem, RGB(230, 230, 230));
+    SetTextColor(mem, RGB(235, 235, 240));
     DrawTextW(mem, wlabel.c_str(), -1, &lr,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     wchar_t tbuf[16];
     std::swprintf(tbuf, sizeof(tbuf), L" %.0f\u00B0C", (float)drives[i].Temperature);
-    RECT vr = { labelEnd, y, w - kCardPad - 10, y + kRowH };
+    RECT vr = { labelEnd, y, w - kCardPad - 12, y + kRowH };
     SetTextColor(mem, diskColor((float)drives[i].Temperature));
     DrawTextW(mem, tbuf, -1, &vr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     y += kRowH + 6;
   }
   y += 8;
 
-  // === Card 2: Power & Fan (no title, starts directly with labels) ===
-  y += 4; // gap between cards (like Slint spacing)
+  // === Card 2: Power & Fan ===
+  y += 4;
   int card2y = y;
-  cardBg(y, 22 + 30 + 22 + 30 + 22 + 36 + 4); // 3 labeled pill rows
+  cardBg(y, 22 + 30 + 22 + 30 + 22 + 36 + 4);
   y += 4;
 
   // Power Modes label + pills.
   {
-    RECT sr = { kCardPad + 10, y, w - kCardPad - 10, y + 16 };
-    SetTextColor(mem, RGB(230, 230, 230));
+    RECT sr = { kCardPad + 12, y, w - kCardPad - 12, y + 16 };
+    SetTextColor(mem, RGB(235, 235, 240));
     SelectObject(mem, m_normFont);
     DrawTextW(mem, L"Power Modes", -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   }
@@ -603,8 +732,8 @@ void MainWindowWin32::OnPaint(HDC hdc) {
 
   // Fan Profiles label + pills.
   {
-    RECT sr = { kCardPad + 10, y, w - kCardPad - 10, y + 16 };
-    SetTextColor(mem, RGB(230, 230, 230));
+    RECT sr = { kCardPad + 12, y, w - kCardPad - 12, y + 16 };
+    SetTextColor(mem, RGB(235, 235, 240));
     SelectObject(mem, m_normFont);
     DrawTextW(mem, L"Fan Profiles", -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   }
@@ -618,8 +747,8 @@ void MainWindowWin32::OnPaint(HDC hdc) {
 
   // GPU MUX label + pills.
   {
-    RECT sr = { kCardPad + 10, y, w - kCardPad - 10, y + 16 };
-    SetTextColor(mem, RGB(230, 230, 230));
+    RECT sr = { kCardPad + 12, y, w - kCardPad - 12, y + 16 };
+    SetTextColor(mem, RGB(235, 235, 240));
     SelectObject(mem, m_normFont);
     DrawTextW(mem, L"GPU MUX", -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   }
@@ -630,151 +759,204 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   y += 36;
 
   // === Card 3: AMD PBO ===
-  y += 4; // gap between cards (like Slint spacing)
+  y += 4;
   int card3y = y;
-  cardBg(y, 20 + 16 + 20); // title + track row (with -30/0) + label (thin block)
+  cardBg(y, 22 + 24 + 20);
   cardTitle(y, L"AMD PBO");
-  y += 20;
+  y += 24;
   int co = hal.GetCachedAmdCurveOptimizer();
-  if (m_draggingSlider && m_dragTrack == 1) co = m_previewCo; // live preview
+  if (m_draggingSlider && m_dragTrack == 1) co = m_previewCo;
   if (co > 0) co = 0;
   if (co < -30) co = -30;
-  m_coTrackX0 = kCardPad + 10 + 22; // leave room for "-30" label
-  m_coTrackX1 = w - kCardPad - 10 - 14; // leave room for "0" label
-  m_coTrackY = y + 8;
-  {
-    // -30 label.
-    RECT lr = { kCardPad + 10, y, kCardPad + 30, y + 16 };
-    SetTextColor(mem, RGB(140, 140, 147));
-    SelectObject(mem, m_smallFont);
-    DrawTextW(mem, L"-30", -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    // 0 label.
-    RECT r0 = { w - kCardPad - 10 - 14, y, w - kCardPad - 10, y + 16 };
-    DrawTextW(mem, L"0", -1, &r0, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
-    // Track.
-    RECT tr = { m_coTrackX0, m_coTrackY - 1, m_coTrackX1, m_coTrackY + 1 };
-    HBRUSH b = CreateSolidBrush(RGB(38, 38, 44));
-    FillRect(mem, &tr, b);
+  // [-] Stepper button on left
+  m_btnCoMinus[0] = y;
+  m_btnCoMinus[1] = y + 20;
+  m_btnCoMinus[2] = kCardPad + 12;
+  m_btnCoMinus[3] = kCardPad + 12 + 22;
+  {
+    RECT bmr = { m_btnCoMinus[2], m_btnCoMinus[0], m_btnCoMinus[3], m_btnCoMinus[1] };
+    HBRUSH bb = CreateSolidBrush(RGB(28, 28, 38));
+    HGDIOBJ oldBb = SelectObject(mem, bb);
+    RoundRect(mem, bmr.left, bmr.top, bmr.right, bmr.bottom, 6, 6);
+    SelectObject(mem, oldBb);
+    DeleteObject(bb);
+    SetTextColor(mem, RGB(240, 240, 245));
+    SelectObject(mem, m_boldFont);
+    DrawTextW(mem, L"-", -1, &bmr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  }
+
+  // [+] Stepper button on right
+  m_btnCoPlus[0] = y;
+  m_btnCoPlus[1] = y + 20;
+  m_btnCoPlus[2] = w - kCardPad - 12 - 22;
+  m_btnCoPlus[3] = w - kCardPad - 12;
+  {
+    RECT bpr = { m_btnCoPlus[2], m_btnCoPlus[0], m_btnCoPlus[3], m_btnCoPlus[1] };
+    HBRUSH bb = CreateSolidBrush(RGB(28, 28, 38));
+    HGDIOBJ oldBb = SelectObject(mem, bb);
+    RoundRect(mem, bpr.left, bpr.top, bpr.right, bpr.bottom, 6, 6);
+    SelectObject(mem, oldBb);
+    DeleteObject(bb);
+    SetTextColor(mem, RGB(240, 240, 245));
+    SelectObject(mem, m_boldFont);
+    DrawTextW(mem, L"+", -1, &bpr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+  }
+
+  // Track between buttons
+  m_coTrackX0 = kCardPad + 42;
+  m_coTrackX1 = w - kCardPad - 42;
+  m_coTrackY = y + 10;
+  {
+    // Track
+    RECT tr = { m_coTrackX0, m_coTrackY - 2, m_coTrackX1, m_coTrackY + 2 };
+    HBRUSH b = CreateSolidBrush(RGB(28, 28, 36));
+    HGDIOBJ oldB = SelectObject(mem, b);
+    RoundRect(mem, tr.left, tr.top, tr.right, tr.bottom, 4, 4);
+    SelectObject(mem, oldB);
     DeleteObject(b);
+
     int fillW = (int)((float)(m_coTrackX1 - m_coTrackX0) * (float)(co + 30) /
                       30.0f);
-    RECT fr = { m_coTrackX0, m_coTrackY - 1, m_coTrackX0 + fillW,
-                m_coTrackY + 1 };
+    RECT fr = { m_coTrackX0, m_coTrackY - 2, m_coTrackX0 + fillW,
+                m_coTrackY + 2 };
     HBRUSH fb = CreateSolidBrush(RGB(139, 38, 42));
-    FillRect(mem, &fr, fb);
+    HGDIOBJ oldFb = SelectObject(mem, fb);
+    RoundRect(mem, fr.left, fr.top, std::max(fr.left + 4, fr.right), fr.bottom, 4, 4);
+    SelectObject(mem, oldFb);
     DeleteObject(fb);
-    // Handle (bigger, matches HUD Visibility slider: ring ±7, core ±5).
+
+    // 14px circular thumb handle
     int hx = m_coTrackX0 + fillW;
-    HBRUSH ring = CreateSolidBrush(RGB(14, 14, 18));
+    HBRUSH ring = CreateSolidBrush(RGB(18, 18, 24));
     HGDIOBJ oldRing = SelectObject(mem, ring);
     Ellipse(mem, hx - 7, m_coTrackY - 7, hx + 7, m_coTrackY + 7);
     SelectObject(mem, oldRing);
     DeleteObject(ring);
+
     HBRUSH hb = CreateSolidBrush(RGB(139, 38, 42));
     HGDIOBJ oldHb = SelectObject(mem, hb);
-    Ellipse(mem, hx - 5, m_coTrackY - 5, hx + 5, m_coTrackY + 5);
+    Ellipse(mem, hx - 4, m_coTrackY - 4, hx + 4, m_coTrackY + 4);
     SelectObject(mem, oldHb);
     DeleteObject(hb);
   }
-  y += 16;
+  y += 22;
   {
     RECT rr = { kCardPad + 10, y, w - kCardPad - 10, y + 18 };
     std::swprintf(buf, sizeof(buf), L"Set: %d counts", co);
-    SetTextColor(mem, RGB(140, 140, 147));
+    SetTextColor(mem, RGB(154, 154, 162));
     SelectObject(mem, m_smallFont);
     DrawTextW(mem, buf, -1, &rr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
   }
   y += 20;
 
   // === Card 4: System ===
-  y += 4; // gap between cards (like Slint spacing)
+  y += 4;
   int card4y = y;
-  cardBg(y, 205);
+  cardBg(y, 210);
   cardTitle(y, L"System Options");
   y += 26;
 
-  checkBox(y, L"80% Battery Care Mode",
-           OmenHal::Get().GetBatteryChargeLimit() <= 80, 0);
-  y += kRowH;
-  checkBox(y, L"Run on Windows Startup", AutoStart(), 1);
-  y += kRowH;
-  checkBox(y, L"Minimize to Tray on Close",
-           FanService::Get().GetOverlayConfig().minimizeOnClose, 2);
-  y += kRowH;
+  toggleSwitch(y, L"80% Battery Care Mode",
+               OmenHal::Get().GetBatteryChargeLimit() <= 80, 0);
+  y += kRowH + 4;
+  toggleSwitch(y, L"Run on Windows Startup", AutoStart(), 1);
+  y += kRowH + 4;
+  toggleSwitch(y, L"Minimize to Tray on Close",
+               FanService::Get().GetOverlayConfig().minimizeOnClose, 2);
+  y += kRowH + 4;
 
-  // Show HUD + HUD Passive on one line (matches Slint).
+  // Show HUD + HUD Passive on one line
   {
-    int half = (w - 2 * kCardPad - 20) / 2;
-    auto box = [&](int x0, int labelW, const wchar_t *label, bool on,
-                   int slot) {
-      RECT br = { x0, y + 3, x0 + 16, y + 19 };
-      HBRUSH b = CreateSolidBrush(on ? RGB(139, 38, 42) : RGB(38, 38, 44));
-      FillRect(mem, &br, b);
-      DeleteObject(b);
-      if (on) {
-        SetTextColor(mem, RGB(255, 255, 255));
-        SelectObject(mem, m_boldFont);
-        DrawTextW(mem, L"\u2713", -1, &br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-      }
-      RECT tr = { x0 + 20, y, x0 + 20 + labelW, y + kRowH };
-      SetTextColor(mem, RGB(230, 230, 230));
-      SelectObject(mem, m_normFont);
+    int half = (w - 2 * kCardPad - 24) / 2;
+    auto miniSwitch = [&](int x0, int labelW, const wchar_t *label, bool on, int slot) {
+      int swW = 28, swH = 16;
+      int swX = x0 + labelW + 4;
+      int swY = y + (kRowH - swH) / 2;
+
+      RECT tr = { x0, y, swX - 4, y + kRowH };
+      SetTextColor(mem, RGB(235, 235, 240));
+      SelectObject(mem, m_smallFont);
       DrawTextW(mem, label, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+      RECT sr = { swX, swY, swX + swW, swY + swH };
+      HBRUSH tb = CreateSolidBrush(on ? RGB(139, 38, 42) : RGB(36, 36, 46));
+      HGDIOBJ oldTb = SelectObject(mem, tb);
+      RoundRect(mem, sr.left, sr.top, sr.right, sr.bottom, 16, 16);
+      SelectObject(mem, oldTb);
+      DeleteObject(tb);
+
+      int thumbD = 12;
+      int thumbX = on ? (swX + swW - thumbD - 2) : (swX + 2);
+      int thumbY = swY + 2;
+      HBRUSH thb = CreateSolidBrush(RGB(255, 255, 255));
+      HGDIOBJ oldThb = SelectObject(mem, thb);
+      Ellipse(mem, thumbX, thumbY, thumbX + thumbD, thumbY + thumbD);
+      SelectObject(mem, oldThb);
+      DeleteObject(thb);
+
       m_chk[slot][0] = y;
       m_chk[slot][1] = y + kRowH;
       m_chk[slot][2] = x0;
-      m_chk[slot][3] = x0 + 20 + labelW;
+      m_chk[slot][3] = swX + swW + 4;
     };
-    box(kCardPad + 10, half - 40, L"Show HUD",
-        FanService::Get().GetOverlayConfig().show, 3);
-    box(kCardPad + 10 + half, half - 40, L"HUD Passive",
-        FanService::Get().GetOverlayConfig().hudPassthrough, 4);
+
+    miniSwitch(kCardPad + 12, half - 36, L"Show HUD",
+               FanService::Get().GetOverlayConfig().show, 3);
+    miniSwitch(kCardPad + 12 + half, half - 36, L"HUD Passive",
+               FanService::Get().GetOverlayConfig().hudPassthrough, 4);
   }
-  y += kRowH;
+  y += kRowH + 2;
 
   // Opacity slider.
   {
-    RECT tr = { kCardPad + 10, y, w - kCardPad - 10, y + kRowH };
+    RECT tr = { kCardPad + 12, y, w - kCardPad - 12, y + kRowH };
     std::swprintf(buf, sizeof(buf), L"HUD Visibility: %d%%",
                   (int)(FanService::Get().GetOverlayConfig().opacity * 100.0f));
-    SetTextColor(mem, RGB(230, 230, 230));
+    SetTextColor(mem, RGB(235, 235, 240));
     SelectObject(mem, m_normFont);
     DrawTextW(mem, buf, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   }
   y += kRowH - 4;
-  m_opacityTrackX0 = kCardPad + 10;
-  m_opacityTrackX1 = w - kCardPad - 10;
+  m_opacityTrackX0 = kCardPad + 12;
+  m_opacityTrackX1 = w - kCardPad - 12;
   m_opacityTrackY = y + 8;
   {
     int op = (int)(FanService::Get().GetOverlayConfig().opacity * 100.0f);
-    RECT tr = { m_opacityTrackX0, m_opacityTrackY - 1, m_opacityTrackX1,
-                m_opacityTrackY + 1 };
-    HBRUSH b = CreateSolidBrush(RGB(38, 38, 44));
-    FillRect(mem, &tr, b);
+    RECT tr = { m_opacityTrackX0, m_opacityTrackY - 2, m_opacityTrackX1,
+                m_opacityTrackY + 2 };
+    HBRUSH b = CreateSolidBrush(RGB(28, 28, 36));
+    HGDIOBJ oldB = SelectObject(mem, b);
+    RoundRect(mem, tr.left, tr.top, tr.right, tr.bottom, 4, 4);
+    SelectObject(mem, oldB);
     DeleteObject(b);
+
     int fillW = (int)((float)(m_opacityTrackX1 - m_opacityTrackX0) *
                       (float)(op - 10) / 90.0f);
-    RECT fr = { m_opacityTrackX0, m_opacityTrackY - 1, m_opacityTrackX0 + fillW,
-                m_opacityTrackY + 1 };
+    RECT fr = { m_opacityTrackX0, m_opacityTrackY - 2, m_opacityTrackX0 + fillW,
+                m_opacityTrackY + 2 };
     HBRUSH fb = CreateSolidBrush(RGB(139, 38, 42));
-    FillRect(mem, &fr, fb);
+    HGDIOBJ oldFb = SelectObject(mem, fb);
+    RoundRect(mem, fr.left, fr.top, std::max(fr.left + 4, fr.right), fr.bottom, 4, 4);
+    SelectObject(mem, oldFb);
     DeleteObject(fb);
+
     int hx = m_opacityTrackX0 + fillW;
-    HBRUSH ring = CreateSolidBrush(RGB(14, 14, 18));
+    HBRUSH ring = CreateSolidBrush(RGB(18, 18, 24));
     HGDIOBJ oldRing = SelectObject(mem, ring);
     Ellipse(mem, hx - 7, m_opacityTrackY - 7, hx + 7, m_opacityTrackY + 7);
     SelectObject(mem, oldRing);
     DeleteObject(ring);
+
     HBRUSH hb = CreateSolidBrush(RGB(139, 38, 42));
     HGDIOBJ oldHb = SelectObject(mem, hb);
-    Ellipse(mem, hx - 5, m_opacityTrackY - 5, hx + 5, m_opacityTrackY + 5);
+    Ellipse(mem, hx - 4, m_opacityTrackY - 4, hx + 4, m_opacityTrackY + 4);
     SelectObject(mem, oldHb);
     DeleteObject(hb);
   }
   y += 20;
 
-  // Flush button (dark, rounded, matches Slint std-widgets button style).
+  // Flush button with feedback animation
   m_btnFlush[0] = y;
   m_btnFlush[1] = y + 28;
   m_btnFlush[2] = kCardPad + 10;
@@ -782,19 +964,25 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   {
     RECT br = { m_btnFlush[2], m_btnFlush[0], m_btnFlush[3],
                 m_btnFlush[1] };
-    HBRUSH b = CreateSolidBrush(RGB(38, 38, 44));
+    bool isFlushed = (m_flushFeedbackTicks > 0);
+    COLORREF btnBg = isFlushed ? RGB(20, 52, 36) : RGB(28, 28, 38);
+    COLORREF btnBorder = isFlushed ? RGB(56, 161, 105) : RGB(52, 52, 66);
+    COLORREF btnTxt = isFlushed ? RGB(70, 240, 160) : RGB(235, 235, 240);
+
+    HBRUSH b = CreateSolidBrush(btnBg);
     HBRUSH old = (HBRUSH)SelectObject(mem, b);
     RoundRect(mem, br.left, br.top, br.right, br.bottom, 8, 8);
     SelectObject(mem, old);
     DeleteObject(b);
-    SetTextColor(mem, RGB(230, 230, 230));
+
+    SetTextColor(mem, btnTxt);
     SelectObject(mem, m_normFont);
-    DrawTextW(mem, L"Flush RAM Cache", -1, &br,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    // Subtle border like Slint std-widgets button.
+    DrawTextW(mem, isFlushed ? L"\u2713 Flushed RAM Cache" : L"Flush RAM Cache",
+              -1, &br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
     HBRUSH nb = (HBRUSH)GetStockObject(NULL_BRUSH);
     HGDIOBJ oldN = SelectObject(mem, nb);
-    HPEN p = CreatePen(PS_SOLID, 1, RGB(80, 80, 90));
+    HPEN p = CreatePen(PS_SOLID, 1, btnBorder);
     HGDIOBJ oldP = SelectObject(mem, p);
     RoundRect(mem, br.left, br.top, br.right, br.bottom, 8, 8);
     SelectObject(mem, oldP);
@@ -803,9 +991,10 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   }
 
   (void)card2y;
-  (void)card3y; // referenced only in card height computation
+  (void)card3y;
+  (void)card4y;
 
-  // Present: Blt while bmp is still selected in mem.
+  // Present
   BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
 
   // Restore + cleanup.

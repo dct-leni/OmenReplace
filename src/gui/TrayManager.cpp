@@ -188,8 +188,16 @@ void TrayManager::HandleMenu(HWND hwnd) {
   case IDM_TRAY_PM_PERF:
     OmenHal::Get().SetPowerMode(2);
     break;
-  case IDM_TRAY_EXIT:
-    PostQuitMessage(0);
+  case IDM_TRAY_EXIT: {
+    HWND main = FindWindowW(L"AMDOMEN_MAIN_WIN32", nullptr);
+    if (main) {
+      PostMessageW(main, WM_APP + 99, 0, 0);
+    } else {
+      HWND hud = FindWindowW(L"AMDOMEN_HUD_WINDOW", nullptr);
+      if (hud) PostMessageW(hud, WM_CLOSE, 0, 0);
+      PostQuitMessage(0);
+    }
     break;
+  }
   }
 }

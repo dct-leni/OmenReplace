@@ -3,6 +3,7 @@
 #include <string>
 #include <timeapi.h>
 
+#include "hal/ApiServer.h"
 #include "hal/FanService.h"
 #include "hal/OmenHal.h"
 #include "hal/OmenLog.h"
@@ -69,6 +70,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showMode) {
   OmenLogStart();
   OmenLog("[OMEN] app start\n");
 
+  ApiServer::Get().Start();
+
   TrayManager tray;
   tray.Start();
 
@@ -89,9 +92,11 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showMode) {
   win32Win.Run();
 
   HudWindow::Instance().Destroy();
+  ApiServer::Get().Stop();
   tray.Stop();
   OmenHal::Get().Shutdown();
   timeEndPeriod(1);
   OmenLog("[OMEN] app exit\n");
+  ExitProcess(0);
   return 0;
 }

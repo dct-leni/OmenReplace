@@ -2,6 +2,7 @@
 
 #include "../hal/FanService.h"
 #include "../hal/OmenHal.h"
+#include "../hal/PowerControl.h"
 #include <algorithm>
 #include <dwmapi.h>
 #include <string>
@@ -13,7 +14,7 @@
 
 namespace {
 constexpr int kWidth = 180;
-constexpr int kHeight = 110;
+constexpr int kHeight = 135;
 constexpr int kResizeGrip = 16;
 } // namespace
 
@@ -101,6 +102,11 @@ void HudWindow::RefreshFromHal() {
   m_gpuTemp = gpuT;
   m_cpuLoad = OmenHal::Get().GetCpuLoad();
   m_gpuLoad = OmenHal::Get().GetGpuLoad();
+
+  float ramUsed = 0, ramTotal = 0, ramPct = 0;
+  PowerControl::Get().GetSystemRamUsage(ramUsed, ramTotal, ramPct);
+  m_ramLoad = ramPct;
+
   if (m_hwnd) InvalidateRect(m_hwnd, nullptr, FALSE);
 }
 
@@ -177,10 +183,14 @@ LRESULT CALLBACK HudWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return 0;
   }
   case WM_MOVING:
-    // Do NOT snap during drag — let the window follow the mouse freely.
-    return 0;
+    // Real-time magnetic screen border snapping while dragging.
+    if (self) {
+      LPRECT rc = (LPRECT)lp;
+      self->SnapToScreenBorders(rc);
+    }
+    return TRUE;
   case WM_EXITSIZEMOVE:
-    // Drag/resize ended: snap to nearest screen border (if close), then persist.
+    // Drag/resize ended: snap to nearest screen border, then persist.
     if (self) {
       RECT rc;
       if (GetWindowRect(hwnd, &rc)) {
@@ -193,10 +203,14 @@ LRESULT CALLBACK HudWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return 0;
   case WM_GETMINMAXINFO: {
     auto *mmi = (MINMAXINFO *)lp;
-    mmi->ptMinTrackSize.x = 70;
-    mmi->ptMinTrackSize.y = 55;
+    mmi->ptMinTrackSize.x = 90;
+    mmi->ptMinTrackSize.y = 75;
     return 0;
   }
+  case WM_CLOSE:
+    if (self) self->Destroy();
+    else DestroyWindow(hwnd);
+    return 0;
   case WM_DESTROY:
     if (self) {
       if (self->m_timerId) KillTimer(hwnd, self->m_timerId);
@@ -227,7 +241,7 @@ void HudWindow::SnapToScreenBorders(LPRECT rc) {
   if (!GetMonitorInfoW(mon, &mi)) return;
   const RECT &wa = mi.rcWork;
 
-  const int snapDist = 6; // pixels from the edge that trigger snapping
+  const int snapDist = 24; // Expanded magnetic snap distance for smooth sticking
   int w = rc->right - rc->left;
   int h = rc->bottom - rc->top;
 
@@ -252,7 +266,7 @@ void HudWindow::OnPaint(HDC hdc) {
   GetClientRect(m_hwnd, &rc);
   int w = rc.right, h = rc.bottom;
 
-  // Scale factors relative to the default 180x110 layout.
+  // Scale factors relative to the default 180x135 layout.
   float sx = (float)w / kWidth;
   float sy = (float)h / kHeight;
   float s = std::min(sx, sy);
@@ -267,8 +281,8 @@ void HudWindow::OnPaint(HDC hdc) {
   FillRect(mem, &rc, bg);
   DeleteObject(bg);
 
-  // Fonts scale with window size (2x size).
-  int fontPx = std::max(12, (int)(30 * s));
+  // Fonts scale with window size.
+  int fontPx = std::max(11, (int)(26 * s));
   HFONT font = CreateFontW(-fontPx, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
@@ -283,29 +297,39 @@ void HudWindow::OnPaint(HDC hdc) {
     return RGB(50, 240, 180);
   };
 
-  // Layout: label left, temp right, thin glowing bars.
-  int pad = std::max(4, (int)(10 * s));
-  int textH = std::max(16, (int)(36 * s));
-  int gapRow = std::max(2, (int)(4 * s));     // text row <-> bar
-  int gapBetween = std::max(4, (int)(12 * s)); // between the two metric blocks
-  int barH = std::max(2, (int)(4 * s));        // thin bar (~80% thinner)
+  // Layout: label left, temp/pct right, thin glowing bars.
+  int pad = std::max(4, (int)(8 * s));
+  int textH = std::max(14, (int)(28 * s));
+  int gapRow = std::max(2, (int)(3 * s));     // text row <-> bar
+  int gapBetween = std::max(4, (int)(10 * s)); // between metric blocks
+  int barH = std::max(2, (int)(4 * s));        // thin bar
 
-  // Vertical center the two metric blocks.
-  int blockH = 2 * (textH + gapRow + barH) + gapBetween;
+  // Vertical center the 3 metric blocks.
+  int blockH = 3 * (textH + gapRow + barH) + 2 * gapBetween;
   int topY = std::max(pad, (h - blockH) / 2);
 
-  auto drawRow = [&](int y, int barY, const wchar_t *label, float temp,
-                     float load) {
+  auto drawRow = [&](int y, int barY, const wchar_t *label, float val,
+                     float load, bool isPercent) {
     // Label left-aligned.
     RECT lr = { pad, y, w / 2, y + textH };
     SetTextColor(mem, RGB(230, 230, 230));
     DrawTextW(mem, label, -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    // Temp right-aligned.
+    // Value right-aligned.
     wchar_t tbuf[16];
-    swprintf_s(tbuf, L"%.0f", temp);
+    if (isPercent) {
+      swprintf_s(tbuf, L"%.0f%%", val);
+    } else {
+      swprintf_s(tbuf, L"%.0f\u00B0", val);
+    }
     RECT tr = { w / 2, y, w - pad, y + textH };
-    SetTextColor(mem, tempColor(temp));
+    COLORREF valColor = isPercent
+                            ? (val > 85.0f
+                                   ? RGB(230, 50, 50)
+                                   : (val > 70.0f ? RGB(230, 200, 50)
+                                                  : RGB(50, 240, 180)))
+                            : tempColor(val);
+    SetTextColor(mem, valColor);
     DrawTextW(mem, tbuf, -1, &tr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
     // Thin load bar: full width, 10 segments, glow on active.
@@ -332,11 +356,15 @@ void HudWindow::OnPaint(HDC hdc) {
 
   int y = topY;
   int barY0 = y + textH + gapRow;
-  drawRow(y, barY0, L"CPU", m_cpuTemp, m_cpuLoad);
+  drawRow(y, barY0, L"CPU", m_cpuTemp, m_cpuLoad, false);
 
   int y2 = barY0 + barH + gapBetween;
   int barY1 = y2 + textH + gapRow;
-  drawRow(y2, barY1, L"GPU", m_gpuTemp, m_gpuLoad);
+  drawRow(y2, barY1, L"GPU", m_gpuTemp, m_gpuLoad, false);
+
+  int y3 = barY1 + barH + gapBetween;
+  int barY2 = y3 + textH + gapRow;
+  drawRow(y3, barY2, L"RAM", m_ramLoad, m_ramLoad, true);
 
   SelectObject(mem, oldFont);
   DeleteObject(font);
@@ -347,4 +375,3 @@ void HudWindow::OnPaint(HDC hdc) {
   DeleteObject(bmp);
   DeleteDC(mem);
 }
-
