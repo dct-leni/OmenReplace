@@ -88,6 +88,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showMode) {
 
   win32Win.Run();
 
+  HudWindow::Instance().Destroy();
   tray.Stop();
   OmenHal::Get().Shutdown();
   timeEndPeriod(1);

@@ -16,6 +16,7 @@ public:
 
   void Show();
   void Hide();
+  void Destroy();
   // Feed telemetry (used by the external telemetry loop).
   void SetTemps(float cpuTemp, float gpuTemp);
   void SetLoads(float cpuLoad, float gpuLoad);

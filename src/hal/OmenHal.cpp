@@ -57,6 +57,7 @@ bool OmenHal::Initialize() {
   ThermalService::Get();
   FanService::Get();
   PowerControl::Get();
+  PowerControl::Get().InitGpuMux(); // one-time GPU MUX probe (requires reboot to change)
 
   if (!m_initialized) {
     WmiHelper wmi;

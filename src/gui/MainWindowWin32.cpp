@@ -391,7 +391,17 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   auto tempColor = [](float t) {
     if (t > 85) return RGB(230, 50, 50);    // #e63232
     if (t > 75) return RGB(230, 200, 50);   // #e6c832
-    return RGB(56, 161, 105);               // #38a169 (matches Slint green)
+    return RGB(56, 161, 105);               // #38a169
+  };
+  auto ramColor = [](float t) {
+    if (t > 70) return RGB(230, 50, 50);
+    if (t > 55) return RGB(230, 200, 50);
+    return RGB(56, 161, 105);
+  };
+  auto diskColor = [](float t) {
+    if (t > 80) return RGB(230, 50, 50);
+    if (t > 70) return RGB(230, 200, 50);
+    return RGB(56, 161, 105);
   };
 
   auto metricRow = [&](int y, const wchar_t *label, const wchar_t *value,
@@ -532,7 +542,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   } else {
     wcscpy_s(buf, L"\u2014");
   }
-  metricRow(y, L"RAM", buf, tempColor(ramT), ramPct);
+  metricRow(y, L"RAM", buf, ramColor(ramT), ramPct);
   y += kRowH + 6;
   auto rpmfn = [](float v) { return (int)((int)(v / 100.0f) * 100); };
   std::swprintf(buf, sizeof(buf), L"%d / %d RPM", rpmfn(fan1), rpmfn(fan2));
@@ -566,7 +576,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     wchar_t tbuf[16];
     std::swprintf(tbuf, sizeof(tbuf), L" %.0f\u00B0C", (float)drives[i].Temperature);
     RECT vr = { labelEnd, y, w - kCardPad - 10, y + kRowH };
-    SetTextColor(mem, tempColor((float)drives[i].Temperature));
+    SetTextColor(mem, diskColor((float)drives[i].Temperature));
     DrawTextW(mem, tbuf, -1, &vr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     y += kRowH + 6;
   }

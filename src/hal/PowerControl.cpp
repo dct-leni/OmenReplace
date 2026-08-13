@@ -80,52 +80,47 @@ void PowerControl::Update() {
     LocalFree(activePlan);
   }
 
-  // 3. Update Graphics Mode
-  std::vector<uint8_t> out;
-
-  // Use persistent WMI helper for background thread
-  if (m_wmiBg.Initialize()) {
-    // GPU Mode: Use 0x00001 (Legacy) and 0x52
-    if (m_wmiBg.ExecuteHpBiosMethod(0x00001, 0x52, NULL, 0, out, 4)) {
-      if (out.size() > 0) {
-        if (m_gpuMode != out[0]) {
-          if (out[0] <= 2) {
-            m_gpuMode = out[0];
-          }
-        }
+  // 3. Update Windows Overlay Scheme
+  PowerMode detectedOverlay = detectedEc; // Fallback to EC
+  HMODULE hPowr = GetModuleHandleA("powrprof.dll");
+  if (!hPowr)
+    hPowr = LoadLibraryA("powrprof.dll");
+  if (hPowr) {
+    auto pGetActualOverlay = (PfnPowerGetActualOverlayScheme)GetProcAddress(
+        hPowr, "PowerGetActualOverlayScheme");
+    if (pGetActualOverlay) {
+      GUID overlay;
+      if (pGetActualOverlay(&overlay) == ERROR_SUCCESS) {
+        if (IsEqualGUID(overlay, GUID_OVERLAY_EFFICIENCY))
+          detectedOverlay = PowerMode::Eco;
+        else if (IsEqualGUID(overlay, GUID_OVERLAY_PERFORMANCE))
+          detectedOverlay = PowerMode::Performance;
+        else if (IsEqualGUID(overlay, GUID_OVERLAY_BALANCED))
+          detectedOverlay = PowerMode::Balanced;
       }
+    }
+  }
 
-      // 4. Update Windows Overlay Scheme
-      PowerMode detectedOverlay = detectedEc; // Fallback to EC
-      HMODULE hPowr = GetModuleHandleA("powrprof.dll");
-      if (!hPowr)
-        hPowr = LoadLibraryA("powrprof.dll");
-      if (hPowr) {
-        auto pGetActualOverlay = (PfnPowerGetActualOverlayScheme)GetProcAddress(
-            hPowr, "PowerGetActualOverlayScheme");
-        if (pGetActualOverlay) {
-          GUID overlay;
-          if (pGetActualOverlay(&overlay) == ERROR_SUCCESS) {
-            if (IsEqualGUID(overlay, GUID_OVERLAY_EFFICIENCY))
-              detectedOverlay = PowerMode::Eco;
-            else if (IsEqualGUID(overlay, GUID_OVERLAY_PERFORMANCE))
-              detectedOverlay = PowerMode::Performance;
-            else if (IsEqualGUID(overlay, GUID_OVERLAY_BALANCED))
-              detectedOverlay = PowerMode::Balanced;
-            // Note: If overlay is unknown or NULL, we assume Balanced or ignore
-          }
-        }
-      }
+  // Synchronize
+  std::lock_guard<std::mutex> lock(m_mutex);
+  // Trust Overlay change if it differs from current (User moved slider)
+  if (detectedOverlay != m_currentMode) {
+    m_currentMode = detectedOverlay;
+  }
+  // Otherwise trust EC hardware change
+  else if (detectedEc != m_currentMode) {
+    m_currentMode = detectedEc;
+  }
+}
 
-      // Synchronize
-      std::lock_guard<std::mutex> lock(m_mutex);
-      // Trust Overlay change if it differs from current (User moved slider)
-      if (detectedOverlay != m_currentMode) {
-        m_currentMode = detectedOverlay;
-      }
-      // Otherwise trust EC hardware change
-      else if (detectedEc != m_currentMode) {
-        m_currentMode = detectedEc;
+void PowerControl::InitGpuMux() {
+  WmiHelper wmi;
+  if (wmi.Initialize()) {
+    std::vector<uint8_t> out;
+    if (wmi.ExecuteHpBiosMethod(0x00001, 0x52, NULL, 0, out, 4)) {
+      if (!out.empty() && out[0] <= 2) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_gpuMode = out[0];
       }
     }
   }

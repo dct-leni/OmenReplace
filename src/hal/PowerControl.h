@@ -46,6 +46,9 @@ public:
   int GetBatteryChargeLimit();
   bool SetBatteryChargeLimit(int limitPercent);
 
+  // GPU MUX startup probe (WMI 0x52; only changes on reboot, no need to poll)
+  void InitGpuMux();
+
   // Memory & System Optimization
   bool FlushMemoryWorkingSet();
   bool GetSystemRamUsage(float &usedGb, float &totalGb, float &pct);

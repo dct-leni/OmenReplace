@@ -69,7 +69,16 @@ void HudWindow::ApplyRoundRegion() {
 }
 
 void HudWindow::Hide() {
-  if (m_hwnd) ShowWindow(m_hwnd, SW_HIDE);
+  if (!m_hwnd) return;
+  if (m_timerId) { KillTimer(m_hwnd, m_timerId); m_timerId = 0; }
+  ShowWindow(m_hwnd, SW_HIDE);
+}
+
+void HudWindow::Destroy() {
+  if (!m_hwnd) return;
+  if (m_timerId) { KillTimer(m_hwnd, m_timerId); m_timerId = 0; }
+  DestroyWindow(m_hwnd);
+  m_hwnd = nullptr;
 }
 
 void HudWindow::SetTemps(float cpuTemp, float gpuTemp) {
