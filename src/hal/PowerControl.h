@@ -32,14 +32,14 @@ public:
   int GetCachedAmdCurveOptimizer() { return m_amdCurveOptimizer; }
   void SetCachedAmdCurveOptimizer(int val) { m_amdCurveOptimizer = val; }
 
-  // CPU power limits via MP1 SMU (Zen4Settings: STAPM 0x4F).
-  // watts: 15..54 W sustained power limit (args[0] in milliwatts).
+  // HP WMI BIOS Power Limits (0x29) & Thermal Policy (0x1A)
+  bool SetCpuPowerLimit(int pl1Watts, int pl2Watts);
+  bool SetThermalPolicy(uint8_t modeByte);
+
+  // CPU power limits via AMD SMU (Fast, Slow, STAPM PPT)
+  bool SetAmdAllPptLimits(int fastW, int slowW, int stapmW);
   bool SetStapmLimit(int watts);
-  // Read current power/temp limits via MP1 GetSustainedPowerAndThmLimit (0x23).
-  // args[0]: bits [23:16] = power limit W, bits [7:0] = temp limit °C.
-  // Returns false if unavailable.
   bool GetPowerThermalLimits(int &powerW, int &tempC);
-  // Set CPU temperature (Tctl) limit via MP1 SetTctlMax (0x3F). 75..105°C.
   bool SetTctlTemp(int tempC);
 
   // Battery Care
@@ -54,7 +54,8 @@ public:
   bool GetSystemRamUsage(float &usedGb, float &totalGb, float &pct);
   float GetCpuVoltage();
 
-
+  // Windows Power Plan & CPU Boost
+  void SetCpuBoostMode(int boostMode);
 
   bool SetFanLevelWmi(int cpuPercent, int gpuPercent); // WMI Method 0x2E
   bool SetFanLevelWmiBg(

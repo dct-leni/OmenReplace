@@ -9,6 +9,7 @@
 #include <iostream>
 #include <objbase.h>
 #include <powrprof.h>
+#include <thread>
 
 #ifdef _MSC_VER
 #pragma comment(lib, "powrprof.lib")
@@ -47,6 +48,23 @@ static const GUID GUID_OVERLAY_BALANCED = {
     0x0000,
     0x0000,
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}}; // Balanced (None)
+
+// Windows Processor Subgroup & Settings GUIDs
+static const GUID GUID_PROCESSOR_SETTINGS_SUBGROUP = {
+    0x54533251,
+    0x82be,
+    0x4824,
+    {0x96, 0xc1, 0x47, 0xb6, 0x0b, 0x74, 0x0d, 0x00}};
+static const GUID GUID_PERFBOOST = {
+    0xbe337238,
+    0x0d82,
+    0x4146,
+    {0xa9, 0x60, 0x4f, 0x37, 0x49, 0xd4, 0x70, 0xc7}};
+static const GUID GUID_PERFEPP = {
+    0x36687f9e,
+    0xe3a5,
+    0x4dbf,
+    {0xb1, 0xdc, 0x15, 0xeb, 0x38, 0x1c, 0x68, 0x63}};
 
 // Function Pointers for Hidden APIs
 typedef DWORD(WINAPI *PfnPowerSetActiveOverlayScheme)(GUID *);
@@ -146,9 +164,8 @@ void PowerControl::CheckThermalPolicy() {
 }
 
 bool PowerControl::SetGpuPower(uint8_t level) {
-  // level: 0=Min, 1=Med, 2=Max
+  // level: 0=Min (no TGP boost, no PPAB), 1=Med (TGP enabled, no PPAB), 2=Max (TGP + PPAB enabled)
   uint8_t data[4] = {0};
-  // GpuCustomTgp, GpuPpab, GpuDState, PeakTemperature
   switch (level) {
   case 0: // Min
     data[0] = 0;
@@ -161,6 +178,10 @@ bool PowerControl::SetGpuPower(uint8_t level) {
   case 2: // Max
     data[0] = 1;
     data[1] = 1;
+    break;
+  default:
+    data[0] = 1;
+    data[1] = 0;
     break;
   }
   data[2] = 0x01; // DState = D1
@@ -246,7 +267,6 @@ bool PowerControl::SetBatteryChargeLimit(int limitPercent) {
   return wmi.ExecuteHpBiosMethod(0x20008, 0x24, data, 4, out, 0);
 }
 
-
 void PowerControl::RestoreFanAuto() {
   // 1. Force BIOS to re-read thermal policy by switching away and back (The
   // "Mode Jiggle") This often breaks the manual lock on 2023+ Omen models
@@ -266,11 +286,82 @@ void PowerControl::RestoreFanAuto() {
   CallHpBios(0x20008, 0x31, idleData, 4, 0);
 }
 
+bool PowerControl::SetCpuPowerLimit(int pl1Watts, int pl2Watts) {
+  // WMI Method 0x29: { pl2, pl1, pl4, tpp }
+  // Sentinel 0xFF means keep current / unchanged.
+  // Clamp to 254 max because 255 (0xFF) is the EC "keep unchanged" sentinel.
+  uint8_t pl1 = (uint8_t)std::max(10, std::min(254, pl1Watts));
+  uint8_t pl2 = (uint8_t)std::max(10, std::min(254, pl2Watts));
+  uint8_t data[4] = { pl2, pl1, 0xFF, 0xFF };
+  return CallHpBios(0x20008, 0x29, data, 4, 0);
+}
+
+bool PowerControl::SetThermalPolicy(uint8_t modeByte) {
+  // WMI Method 0x1A: { 0xFF, modeByte, 0x00, 0x00 }
+  // 0x30 = Default/Balanced (PerformanceMode.L2), 0x31 = Performance/Unleash (PerformanceMode.L7)
+  uint8_t data[4] = { 0xFF, modeByte, 0x00, 0x00 };
+  return CallHpBios(0x20008, 0x1A, data, 4, 0);
+}
+
+bool PowerControl::SetAmdAllPptLimits(int fastW, int slowW, int stapmW) {
+  OmenEc &ec = OmenEc::Get();
+  if (!ec.IsInitialized()) return false;
+
+  bool anyOk = false;
+
+  // 1. Fast PPT (Burst limit in mW)
+  uint32_t argsFast[6] = { (uint32_t)(fastW * 1000), 0, 0, 0, 0, 0 };
+  if (ec.SendMp1Command(0x3E, argsFast)) anyOk = true;
+  else {
+    uint32_t rFast[6] = { (uint32_t)(fastW * 1000), 0, 0, 0, 0, 0 };
+    if (ec.SendSmuCommand(0x56, rFast)) anyOk = true;
+  }
+
+  // 2. Slow PPT (Sustained boost limit in mW)
+  uint32_t argsSlow[6] = { (uint32_t)(slowW * 1000), 0, 0, 0, 0, 0 };
+  if (ec.SendMp1Command(0x5F, argsSlow)) anyOk = true;
+  else {
+    uint32_t rSlow[6] = { (uint32_t)(slowW * 1000), 0, 0, 0, 0, 0 };
+    if (ec.SendSmuCommand(0xCB, rSlow)) anyOk = true;
+  }
+
+  // 3. STAPM (Sustained envelope limit in mW)
+  uint32_t argsStapm[6] = { (uint32_t)(stapmW * 1000), 0, 0, 0, 0, 0 };
+  if (ec.SendMp1Command(0x4F, argsStapm)) anyOk = true;
+
+  return anyOk;
+}
+
+void PowerControl::SetCpuBoostMode(int boostMode) {
+  // Boost modes: 0=Disabled, 1=Enabled, 2=Aggressive, 3=Efficient Enabled, 4=Efficient Aggressive
+  GUID *activeScheme = nullptr;
+  if (PowerGetActiveScheme(NULL, &activeScheme) == ERROR_SUCCESS && activeScheme) {
+    PowerWriteACValueIndex(NULL, activeScheme, &GUID_PROCESSOR_SETTINGS_SUBGROUP, &GUID_PERFBOOST, (DWORD)boostMode);
+    PowerWriteDCValueIndex(NULL, activeScheme, &GUID_PROCESSOR_SETTINGS_SUBGROUP, &GUID_PERFBOOST, (DWORD)boostMode);
+    PowerSetActiveScheme(NULL, activeScheme);
+    LocalFree(activeScheme);
+  }
+}
+
+static void SetEppPreference(DWORD eppVal) {
+  // EPP: 0=Max Performance, 50=Balanced, 80=Energy Efficient
+  GUID *activeScheme = nullptr;
+  if (PowerGetActiveScheme(NULL, &activeScheme) == ERROR_SUCCESS && activeScheme) {
+    PowerWriteACValueIndex(NULL, activeScheme, &GUID_PROCESSOR_SETTINGS_SUBGROUP, &GUID_PERFEPP, eppVal);
+    PowerWriteDCValueIndex(NULL, activeScheme, &GUID_PROCESSOR_SETTINGS_SUBGROUP, &GUID_PERFEPP, eppVal);
+    PowerSetActiveScheme(NULL, activeScheme);
+    LocalFree(activeScheme);
+  }
+}
+
 void PowerControl::SetMode(PowerMode mode) {
   CheckThermalPolicy();
 
-  uint8_t ecValue = 0x00;
+  // 1. Set HP WMI Thermal Policy (0x1A) and EC Mode Byte (0xCE)
+  uint8_t thermalByte = (mode == PowerMode::Performance || mode == PowerMode::Turbo) ? 0x31 : 0x30;
+  SetThermalPolicy(thermalByte);
 
+  uint8_t ecValue = 0x00;
   switch (mode) {
   case PowerMode::Eco:
     ecValue = 0x02;
@@ -283,28 +374,51 @@ void PowerControl::SetMode(PowerMode mode) {
     ecValue = 0x01;
     break;
   }
-
   OmenEc::Get().WriteByte(0xCE, ecValue);
+
+  // 2. Yield briefly so the EC finishes its internal mode transition
+  // without wiping our upcoming custom power limit configuration.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  // 3. Configure CPU (WMI 0x29) and GPU (WMI 0x22) limits per mode
+  int pl1 = 45, pl2 = 54;
+  uint8_t gpuLvl = 1;
+  int fastPpt = 54, slowPpt = 45, stapmPpt = 45;
+
+  switch (mode) {
+  case PowerMode::Eco:
+    pl1 = 25; pl2 = 35;
+    gpuLvl = 0;
+    fastPpt = 35; slowPpt = 25; stapmPpt = 25;
+    break;
+  case PowerMode::Balanced:
+    pl1 = 45; pl2 = 54;
+    gpuLvl = 1;
+    fastPpt = 54; slowPpt = 45; stapmPpt = 45;
+    break;
+  case PowerMode::Performance:
+    pl1 = 75; pl2 = 90;
+    gpuLvl = 2;
+    fastPpt = 90; slowPpt = 75; stapmPpt = 75;
+    break;
+  case PowerMode::Turbo:
+    pl1 = 254; pl2 = 254; // Uncapped
+    gpuLvl = 2;
+    fastPpt = 120; slowPpt = 95; stapmPpt = 85;
+    break;
+  }
+
+  SetCpuPowerLimit(pl1, pl2);
+  SetGpuPower(gpuLvl);
+
+  // 4. Send AMD SMU PPT limits
+  SetAmdAllPptLimits(fastPpt, slowPpt, stapmPpt);
+
+  // 5. Windows Power Plan & CPU Boost
   SetWindowsPowerPlan(mode);
 
-  // Apply CPU power (STAPM) limit per mode via MP1 SMU.
-  // Eco=25W, Balanced=45W, Performance/Turbo=Unlimited (skip the limit so the
-  // firmware keeps its default). Best-effort: ignore failure to stay robust.
-  if (mode == PowerMode::Eco)
-    SetStapmLimit(25);
-  else if (mode == PowerMode::Balanced)
-    SetStapmLimit(45);
-  // Performance / Turbo: leave the power limit untouched (unlimited).
-
-  // Verify: read back the firmware's current limits and log them (debug only).
-  {
-    int pw = 0, tc = 0;
-    if (GetPowerThermalLimits(pw, tc))
-      OmenLog("[OMEN] power_mode=%d -> smu_power_limit=%dW smu_temp_limit=%dC\n",
-              (int)mode, pw, tc);
-    else
-      OmenLog("[OMEN] power_mode=%d smu_readback FAILED\n", (int)mode);
-  }
+  OmenLog("[OMEN] SetMode(%d): WMI 0x1A=0x%02X, 0x29=(PL1=%dW, PL2=%dW), GPU=%d, SMU PPT=(%d/%d/%dW)\n",
+          (int)mode, thermalByte, pl1, pl2, (int)gpuLvl, fastPpt, slowPpt, stapmPpt);
 
   {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -321,19 +435,27 @@ void PowerControl::SetWindowsPowerPlan(PowerMode mode) {
     auto pSetActiveOverlay = (PfnPowerSetActiveOverlayScheme)GetProcAddress(
         hPowr, "PowerSetActiveOverlayScheme");
     if (pSetActiveOverlay) {
-      // Ensure base plan is Balanced first (Standard requirement for
-      // Overlays)
+      // Ensure base plan is Balanced first (Standard requirement for Overlays)
       GUID base = GUID_BALANCED;
       PowerSetActiveScheme(NULL, &base);
 
-      // Set Overlay
+      // Set Overlay, EPP, and CPU Boost
       GUID overlay = GUID_OVERLAY_BALANCED;
-      if (mode == PowerMode::Eco)
+      if (mode == PowerMode::Eco) {
         overlay = GUID_OVERLAY_EFFICIENCY;
-      else if (mode == PowerMode::Performance || mode == PowerMode::Turbo)
+        pSetActiveOverlay(&overlay);
+        SetEppPreference(80);
+        SetCpuBoostMode(0); // Boost Disabled in Eco
+      } else if (mode == PowerMode::Performance || mode == PowerMode::Turbo) {
         overlay = GUID_OVERLAY_PERFORMANCE;
-
-      pSetActiveOverlay(&overlay);
+        pSetActiveOverlay(&overlay);
+        SetEppPreference(0);
+        SetCpuBoostMode(2); // Aggressive Boost
+      } else {
+        pSetActiveOverlay(&overlay);
+        SetEppPreference(50);
+        SetCpuBoostMode(3); // Efficient Enabled
+      }
       return;
     }
   }
@@ -454,7 +576,6 @@ int PowerControl::GetAmdCurveOptimizer() {
   return 0;
 }
 
-
 bool PowerControl::SetStapmLimit(int watts) {
   OmenEc &ec = OmenEc::Get();
   if (!ec.IsInitialized()) return false;
@@ -462,7 +583,7 @@ bool PowerControl::SetStapmLimit(int watts) {
   // Zen4Settings: MP1 SMU_MSG_SetStapmLimit = 0x4F, args[0] = watts*1000.
   int w = watts;
   if (w < 15) w = 15;
-  if (w > 54) w = 54; // omenecore clamp 15-54W
+  if (w > 54) w = 54;
 
   uint32_t args[6] = {(uint32_t)(w * 1000), 0, 0, 0, 0, 0};
   return ec.SendMp1Command(0x4F, args);
@@ -521,7 +642,3 @@ float PowerControl::GetCpuVoltage() {
   float coOffsetV = (m_amdCurveOptimizer * 0.0035f); // ~3.5mV per count
   return std::max(0.85f, std::min(1.45f, baseVid + coOffsetV));
 }
-
-
-
-

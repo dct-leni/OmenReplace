@@ -13,6 +13,7 @@ CMakeLists.txt
 .agents/
 .graymatter/
 external_source/
+PLAN_RUST.md
 
 # Binary & Object Files
 *.a
