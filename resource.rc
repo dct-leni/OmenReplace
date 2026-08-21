@@ -15,12 +15,12 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "CompanyName",      "OMEN Community"
-            VALUE "FileDescription",  "amdOMEN Control"
+            VALUE "CompanyName",      "AMDOMEN"
+            VALUE "FileDescription",  "AMDOMEN Control"
             VALUE "FileVersion",      "1.0.0.0"
             VALUE "InternalName",     "AMDOMEN"
-            VALUE "OriginalFilename", "amdOMEN.exe"
-            VALUE "ProductName",      "amdOMEN Control"
+            VALUE "OriginalFilename", "AMDOMEN.exe"
+            VALUE "ProductName",      "AMDOMEN Control"
             VALUE "ProductVersion",   "1.0.0.0"
         END
     END

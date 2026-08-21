@@ -55,5 +55,5 @@ if exist "%ROOT%\output\libs" rmdir /s /q "%ROOT%\output\libs"
 if exist "%ROOT%\output\slint_cpp.dll" del /q "%ROOT%\output\slint_cpp.dll" 2>nul
 
 echo.
-echo Build successful. Binary: output\OmenControl.exe
+echo Build successful. Binary: output\AMDOMEN.exe
 exit /b 0

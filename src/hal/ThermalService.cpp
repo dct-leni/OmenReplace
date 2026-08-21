@@ -143,7 +143,7 @@ void ThermalService::Update() {
       gpuPower = (gpuLoad / 100.0f) * 115.0f + (gpuLoad > 5.0f ? 12.0f : 4.0f);
     }
     lastRawPower = cpuPower + gpuPower + 12.0f;
-    OmenLog("[OMEN] power_debug cpu_raw=%d gpu_raw=%d total_est=%d\n",
+    OmenLog("[AMDOMEN] power_debug cpu_raw=%d gpu_raw=%d total_est=%d\n",
             (int)cpuPower, (int)gpuPower, (int)lastRawPower);
 
     {

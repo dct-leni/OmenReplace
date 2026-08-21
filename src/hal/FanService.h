@@ -39,6 +39,8 @@ public:
     int batteryLimit = 80;
     bool minimizeOnClose = true;
     bool logEnabled = false;
+    // CPU temp (Tctl) limit via MP1 0x3F. 0 = Auto (firmware default).
+    int tctlLimit = 90;
     // Embedded API configuration
     bool apiEnabled = true;
     int apiPort = 8080;
@@ -68,6 +70,7 @@ private:
 
   int m_fan1Target = 0;
   int m_fan2Target = 0;
+  int m_heldPidTarget = -1; // deadband-held PID output (-1 = none yet)
   int m_persistenceCounter = 0;
 
   // Hysteresis

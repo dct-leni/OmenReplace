@@ -17,7 +17,7 @@ bool FanController::AssertTargets(int cpuPercent, int gpuPercent) {
   OmenEc::Get().SetFanSpeedPercent(1, gpuPercent);
 
   if (m_wmiDisabled) {
-    OmenLog("[OMEN] fan_hw wmi=skipped ec=written cpu=%d gpu=%d\n",
+    OmenLog("[AMDOMEN] fan_hw wmi=skipped ec=written cpu=%d gpu=%d\n",
             cpuPercent, gpuPercent);
     return true;
   }
@@ -27,7 +27,7 @@ bool FanController::AssertTargets(int cpuPercent, int gpuPercent) {
     ++m_wmiFailCount;
     if (m_wmiFailCount >= 3) {
       m_wmiDisabled = true;
-      OmenLog("[OMEN] fan_hw wmi_disabled after %d consecutive failures; continuing EC-only\n",
+      OmenLog("[AMDOMEN] fan_hw wmi_disabled after %d consecutive failures; continuing EC-only\n",
               m_wmiFailCount);
     }
   } else {

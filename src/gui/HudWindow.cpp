@@ -55,7 +55,7 @@ void HudWindow::Show() {
     if (!m_hwnd) return;
   }
   ShowWindow(m_hwnd, SW_SHOWNOACTIVATE);
-  SetLayeredWindowAttributes(m_hwnd, 0, 230, LWA_ALPHA);
+  SetOpacity(FanService::Get().GetOverlayConfig().opacity);
   ApplyRoundRegion();
   RefreshFromHal();
   if (!m_timerId) m_timerId = SetTimer(m_hwnd, 2, 1000, nullptr);
@@ -300,7 +300,7 @@ void HudWindow::OnPaint(HDC hdc) {
   // Layout: label left, temp/pct right, thin glowing bars.
   int pad = std::max(4, (int)(8 * s));
   int textH = std::max(14, (int)(28 * s));
-  int gapRow = std::max(2, (int)(3 * s));     // text row <-> bar
+  int gapRow = std::max(3, (int)(6 * s));     // text row <-> bar
   int gapBetween = std::max(4, (int)(10 * s)); // between metric blocks
   int barH = std::max(2, (int)(4 * s));        // thin bar
 
@@ -310,9 +310,9 @@ void HudWindow::OnPaint(HDC hdc) {
 
   auto drawRow = [&](int y, int barY, const wchar_t *label, float val,
                      float load, bool isPercent) {
-    // Label left-aligned.
+    // Label left-aligned (dimmed — the values carry all attention).
     RECT lr = { pad, y, w / 2, y + textH };
-    SetTextColor(mem, RGB(230, 230, 230));
+    SetTextColor(mem, RGB(150, 150, 155));
     DrawTextW(mem, label, -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // Value right-aligned.
@@ -332,25 +332,18 @@ void HudWindow::OnPaint(HDC hdc) {
     SetTextColor(mem, valColor);
     DrawTextW(mem, tbuf, -1, &tr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
-    // Thin load bar: full width, 10 segments, glow on active.
-    int gap = std::max(1, (int)(1 * s));
-    int segW = (w - 2 * pad - 9 * gap) / 10;
-    int bx = pad;
-    for (int i = 0; i < 10; i++) {
-      bool on = load > (i + 0.5f) * 10.0f;
-      // Glow halo behind active segment.
-      if (on) {
-        HBRUSH glow = CreateSolidBrush(RGB(40, 120, 100));
-        RECT gr = { bx - gap, barY - 1, bx + segW + gap, barY + barH + 1 };
-        FillRect(mem, &gr, glow);
-        DeleteObject(glow);
-      }
-      RECT seg = { bx, barY, bx + segW, barY + barH };
-      HBRUSH sb = CreateSolidBrush(on ? RGB(255, 255, 255)
-                                      : RGB(38, 38, 44));
-      FillRect(mem, &seg, sb);
-      DeleteObject(sb);
-      bx += segW + gap;
+    // Thin solid load bar; fill follows the same state color as the value.
+    RECT track = { pad, barY, w - pad, barY + barH };
+    HBRUSH tb = CreateSolidBrush(RGB(38, 38, 44));
+    FillRect(mem, &track, tb);
+    DeleteObject(tb);
+    int fillW =
+        (int)((float)(w - 2 * pad) * std::clamp(load / 100.0f, 0.0f, 1.0f));
+    if (fillW > 0) {
+      RECT fr = { pad, barY, pad + fillW, barY + barH };
+      HBRUSH fb = CreateSolidBrush(valColor);
+      FillRect(mem, &fr, fb);
+      DeleteObject(fb);
     }
   };
 

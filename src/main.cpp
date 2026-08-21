@@ -61,14 +61,14 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showMode) {
   timeBeginPeriod(1);
 
   if (!OmenHal::Get().Initialize())
-    OmenLog("[OMEN] HAL initialization failed\n");
+    OmenLog("[AMDOMEN] HAL initialization failed\n");
 
   // Load config (reads power_mode, fan_mode from config.json). Must run AFTER
   // HAL init so SetMode can write to the EC.
   FanService::Get();
   OmenLogSetEnabled(FanService::Get().GetOverlayConfig().logEnabled);
   OmenLogStart();
-  OmenLog("[OMEN] app start\n");
+  OmenLog("[AMDOMEN] app start\n");
 
   ApiServer::Get().Start();
 
@@ -96,7 +96,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showMode) {
   tray.Stop();
   OmenHal::Get().Shutdown();
   timeEndPeriod(1);
-  OmenLog("[OMEN] app exit\n");
+  OmenLog("[AMDOMEN] app exit\n");
   ExitProcess(0);
   return 0;
 }

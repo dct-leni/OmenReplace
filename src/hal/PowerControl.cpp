@@ -417,7 +417,7 @@ void PowerControl::SetMode(PowerMode mode) {
   // 5. Windows Power Plan & CPU Boost
   SetWindowsPowerPlan(mode);
 
-  OmenLog("[OMEN] SetMode(%d): WMI 0x1A=0x%02X, 0x29=(PL1=%dW, PL2=%dW), GPU=%d, SMU PPT=(%d/%d/%dW)\n",
+  OmenLog("[AMDOMEN] SetMode(%d): WMI 0x1A=0x%02X, 0x29=(PL1=%dW, PL2=%dW), GPU=%d, SMU PPT=(%d/%d/%dW)\n",
           (int)mode, thermalByte, pl1, pl2, (int)gpuLvl, fastPpt, slowPpt, stapmPpt);
 
   {
@@ -480,11 +480,11 @@ bool PowerControl::CallHpBios(uint32_t cmd, uint32_t type, uint8_t *data,
                                      expectedOutSize);
   }
 
-  WmiHelper wmi;
-  if (!wmi.Initialize())
-    return false;
-  std::vector<uint8_t> out;
-  return wmi.ExecuteHpBiosMethod(cmd, type, data, size, out, expectedOutSize);
+  // Thread-local persistent connection: WMI setup costs ~70ms, and SetMode
+  // makes up to 3 BIOS calls per invocation. Each thread (UI, worker) pays
+  // the connect cost once instead of per call.
+  static thread_local WmiHelper tlsWmi;
+  return CallHpBios(cmd, type, data, size, expectedOutSize, &tlsWmi);
 }
 
 PowerMode PowerControl::GetCurrentMode() {

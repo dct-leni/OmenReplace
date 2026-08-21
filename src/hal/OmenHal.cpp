@@ -26,7 +26,7 @@ void OmenHal::Shutdown() {
   if (!m_initialized)
     return;
 
-  OmenLog("[OMEN] Shutdown begin\n");
+  OmenLog("[AMDOMEN] Shutdown begin\n");
   m_fanControlActive = false;
   m_stopWorker = true;
   m_workerWake.notify_all();
@@ -34,10 +34,10 @@ void OmenHal::Shutdown() {
   if (m_workerThread.joinable())
     m_workerThread.join();
 
-  OmenLog("[OMEN] Shutdown restoring fan control\n");
+  OmenLog("[AMDOMEN] Shutdown restoring fan control\n");
   FanController::Get().RestoreBios();
 
-  OmenLog("[OMEN] Shutdown complete\n");
+  OmenLog("[AMDOMEN] Shutdown complete\n");
   m_initialized = false;
 }
 
@@ -45,13 +45,13 @@ bool OmenHal::Initialize() {
   if (m_initialized)
     return true;
 
-  OmenLog("[OMEN] HAL initialize begin\n");
+  OmenLog("[AMDOMEN] HAL initialize begin\n");
 
   if (!OmenEc::Get().Initialize()) {
-    OmenLog("[OMEN] HAL EC initialize failed\n");
+    OmenLog("[AMDOMEN] HAL EC initialize failed\n");
     return false;
   }
-  OmenLog("[OMEN] HAL EC initialize ok\n");
+  OmenLog("[AMDOMEN] HAL EC initialize ok\n");
 
   // Trigger initial scans in services
   ThermalService::Get();
@@ -104,7 +104,7 @@ bool OmenHal::Initialize() {
   m_fanControlActive = false;
   m_initialized = true;
   m_workerThread = std::thread(&OmenHal::BackgroundLoop, this);
-  OmenLog("[OMEN] HAL worker started\n");
+  OmenLog("[AMDOMEN] HAL worker started\n");
 
   return true;
 }
@@ -152,14 +152,14 @@ void OmenHal::BackgroundLoop() {
   if (FAILED(comResult)) {
     char message[128];
     std::snprintf(message, sizeof(message),
-                  "[OMEN] worker COM initialize failed hr=0x%08lx\n",
+                  "[AMDOMEN] worker COM initialize failed hr=0x%08lx\n",
                   (unsigned long)comResult);
     OmenLog("%s", message);
     m_fanControlReady = false;
   } else {
     char message[128];
     std::snprintf(message, sizeof(message),
-                  "[OMEN] worker COM initialize ok hr=0x%08lx\n",
+                  "[AMDOMEN] worker COM initialize ok hr=0x%08lx\n",
                   (unsigned long)comResult);
     OmenLog("%s", message);
     m_fanControlReady = true;
@@ -168,6 +168,58 @@ void OmenHal::BackgroundLoop() {
   if (FanService::Get().GetControlMode() == FanControlMode::AppMode) {
     m_fanControlActive = true;
     FanService::Get().SetProfile(FanService::Get().GetProfile());
+  }
+
+  // Startup re-apply of the saved power limits with verification. The early
+  // SetMode from LoadConfig runs milliseconds after PawnIO module load and the
+  // SMU/firmware can drop or override it. Retry until MP1 readback matches.
+  {
+    // Per-mode PPT targets must mirror PowerControl::SetMode's table.
+    PowerMode saved = PowerControl::Get().GetCurrentMode();
+    int fast = 0, slow = 0, stapm = 0;
+    switch (saved) {
+    case PowerMode::Eco:         fast = 35;  slow = 25; stapm = 25; break;
+    case PowerMode::Balanced:    fast = 54;  slow = 45; stapm = 45; break;
+    case PowerMode::Performance: fast = 90;  slow = 75; stapm = 75; break;
+    case PowerMode::Turbo:       fast = 120; slow = 95; stapm = 85; break;
+    default: break;
+    }
+
+    auto diff = [](int a, int b) { return a > b ? a - b : b - a; };
+
+    for (int attempt = 1; fast > 0 && attempt <= 5 && !m_stopWorker;
+         attempt++) {
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+      if (m_stopWorker) break;
+      PowerControl::Get().SetMode(saved);
+      int pw = 0, tc = 0;
+      if (!PowerControl::Get().GetPowerThermalLimits(pw, tc)) {
+        OmenLog("[AMDOMEN] startup power verify attempt=%d readback FAILED\n",
+                attempt);
+        continue;
+      }
+      // The MP1 0x23 sustained-power field does not echo STAPM verbatim on
+      // this firmware (observed ~fast-limit + margin). Accept a match within
+      // 2W of ANY of the three limits we applied.
+      if (diff(pw, fast) <= 2 || diff(pw, slow) <= 2 || diff(pw, stapm) <= 2) {
+        OmenLog("[AMDOMEN] startup power limit verified %dW (tctl %dC) on "
+                "attempt %d\n",
+                pw, tc, attempt);
+        break;
+      }
+      OmenLog("[AMDOMEN] startup power verify attempt=%d got=%dW tctl=%dC "
+              "(targets %d/%d/%dW)\n",
+              attempt, pw, tc, fast, slow, stapm);
+    }
+  }
+
+  // Apply persisted CPU temp (Tctl) limit. 0 = Auto (leave firmware default).
+  {
+    int tctl = FanService::Get().GetOverlayConfig().tctlLimit;
+    if (tctl > 0) {
+      PowerControl::Get().SetTctlTemp(tctl);
+      OmenLog("[AMDOMEN] startup tctl_limit applied %dC\n", tctl);
+    }
   }
 
   int updateCounter = 0;

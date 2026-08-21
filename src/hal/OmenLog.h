@@ -19,13 +19,13 @@ inline std::string OmenLogPath() {
   char path[MAX_PATH] = {};
   DWORD length = GetModuleFileNameA(nullptr, path, MAX_PATH);
   if (length == 0 || length >= MAX_PATH)
-    return "omen_control.log";
+    return "amdomen.log";
 
   std::string result(path, length);
   size_t separator = result.find_last_of("\\/");
   if (separator == std::string::npos)
-    return "omen_control.log";
-  return result.substr(0, separator + 1) + "omen_control.log";
+    return "amdomen.log";
+  return result.substr(0, separator + 1) + "amdomen.log";
 }
 
 inline bool &OmenLogEnabledFlag() {

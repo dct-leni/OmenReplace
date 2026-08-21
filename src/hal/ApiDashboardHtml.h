@@ -12,7 +12,7 @@ inline const std::string& GetDashboardHtml() {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>OMEN Control</title>
+<title>AMDOMEN</title>
 <style>
 :root {
   --bg: #08080c;

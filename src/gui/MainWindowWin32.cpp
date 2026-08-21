@@ -7,6 +7,7 @@
 #include <vector>
 #include <windowsx.h>
 
+#include "../hal/ApiServer.h"
 #include "../hal/FanService.h"
 #include "../hal/OmenHal.h"
 #include "../hal/OmenLog.h"
@@ -29,7 +30,7 @@ bool AutoStart() {
                     L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0,
                     KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
     return false;
-  bool on = RegQueryValueExW(key, L"OMENControlOptimizer", nullptr, nullptr,
+  bool on = RegQueryValueExW(key, L"AMDOMEN", nullptr, nullptr,
                              nullptr, nullptr) == ERROR_SUCCESS;
   RegCloseKey(key);
   return on;
@@ -42,14 +43,14 @@ void ToggleAutoStart() {
                     KEY_SET_VALUE, &key) != ERROR_SUCCESS)
     return;
   if (AutoStart()) {
-    RegDeleteValueW(key, L"OMENControlOptimizer");
+    RegDeleteValueW(key, L"AMDOMEN");
   } else {
     wchar_t path[MAX_PATH];
     if (GetModuleFileNameW(nullptr, path, MAX_PATH)) {
       std::wstring cmd = L"\"";
       cmd += path;
       cmd += L"\"";
-      RegSetValueExW(key, L"OMENControlOptimizer", 0, REG_SZ,
+      RegSetValueExW(key, L"AMDOMEN", 0, REG_SZ,
                      (const BYTE *)cmd.c_str(),
                      (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
     }
@@ -92,7 +93,7 @@ void MainWindowWin32::Show() {
         GetModuleHandleW(nullptr), this);
     if (!m_hwnd) return;
   }
-  OmenLog("[OMEN] win32 main window show hwnd=%p\n", m_hwnd);
+  OmenLog("[AMDOMEN] win32 main window show hwnd=%p\n", m_hwnd);
   // Dark title bar (matches the dark theme).
   BOOL dark = TRUE;
   DwmSetWindowAttribute(m_hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark,
@@ -150,6 +151,23 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(hwnd, &ps);
     if (self) self->OnPaint(hdc);
+    // Auto-fit window height to content once after first paint.
+    if (self && self->m_requiredClientH > 0 && !self->m_autoSized) {
+      self->m_autoSized = true;
+      RECT rc;
+      if (GetClientRect(hwnd, &rc)) {
+        int delta = self->m_requiredClientH - rc.bottom;
+        OmenLog("[AMDOMEN] win32 autofit required=%d client=%d delta=%d\n",
+                self->m_requiredClientH, rc.bottom, delta);
+        if (delta != 0) {
+          RECT wr;
+          if (GetWindowRect(hwnd, &wr))
+            SetWindowPos(hwnd, nullptr, 0, 0, wr.right - wr.left,
+                         wr.bottom - wr.top + delta,
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+      }
+    }
     EndPaint(hwnd, &ps);
     return 0;
   }
@@ -230,7 +248,7 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
       }
       // Toggle switches
       if (!isInteractive) {
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 6; i++) {
           if (x >= self->m_chk[i][2] && x <= self->m_chk[i][3] &&
               y >= self->m_chk[i][0] && y <= self->m_chk[i][1]) {
             isInteractive = true; break;
@@ -277,12 +295,6 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
   return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-MainWindowWin32::Card MainWindowWin32::LayoutCard(int y,
-                                                  const wchar_t *title) {
-  // Draw card background + title, return content area bounds.
-  return {y + 24, kRowH}; // placeholder; actual drawing in OnPaint
-}
-
 void MainWindowWin32::OnTimer() {
   if (m_flushFeedbackTicks > 0) {
     m_flushFeedbackTicks--;
@@ -319,6 +331,23 @@ void MainWindowWin32::OnLButtonDown(int x, int y) {
     if (x >= m_muxPill[i][2] && x <= m_muxPill[i][3] &&
         y >= m_muxPill[i][0] && y <= m_muxPill[i][1]) {
       OmenHal::Get().RequestGpuMode(i);
+      InvalidateRect(m_hwnd, nullptr, FALSE);
+      return;
+    }
+  }
+
+  // AMD CO [-] / [+] Stepper Buttons
+  // Tctl limit pills.
+  for (int i = 0; i < 4; i++) {
+    if (x >= m_tctlPill[i][2] && x <= m_tctlPill[i][3] &&
+        y >= m_tctlPill[i][0] && y <= m_tctlPill[i][1]) {
+      static const int vals[4] = {0, 95, 90, 85};
+      int v = vals[i];
+      auto &cfg = FanService::Get().GetOverlayConfig();
+      cfg.tctlLimit = v;
+      FanService::Get().SaveConfig();
+      if (v > 0)
+        OmenHal::Get().SetTctlTemp(v);
       InvalidateRect(m_hwnd, nullptr, FALSE);
       return;
     }
@@ -382,8 +411,8 @@ void MainWindowWin32::OnLButtonDown(int x, int y) {
     InvalidateRect(m_hwnd, nullptr, FALSE);
     return;
   }
-  // Checkboxes / Toggle Switches: battery, autostart, minimize, showhud, passive.
-  for (int i = 0; i < 5; i++) {
+  // Checkboxes / Toggle Switches: battery, autostart, minimize, showhud, passive, api.
+  for (int i = 0; i < 6; i++) {
     if (x >= m_chk[i][2] && x <= m_chk[i][3] && y >= m_chk[i][0] &&
         y <= m_chk[i][1]) {
       switch (i) {
@@ -420,6 +449,16 @@ void MainWindowWin32::OnLButtonDown(int x, int y) {
         cfg.hudPassthrough = !cfg.hudPassthrough;
         HudWindow::Instance().SetPassthrough(cfg.hudPassthrough);
         FanService::Get().SaveConfig();
+        break;
+      }
+      case 5: {
+        auto &cfg = FanService::Get().GetOverlayConfig();
+        cfg.apiEnabled = !cfg.apiEnabled;
+        FanService::Get().SaveConfig();
+        if (cfg.apiEnabled)
+          ApiServer::Get().Start();
+        else
+          ApiServer::Get().Stop();
         break;
       }
       }
@@ -498,17 +537,17 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   auto tempColor = [](float t) {
     if (t > 85) return RGB(230, 50, 50);    // Red
     if (t > 75) return RGB(230, 200, 50);   // Amber
-    return RGB(56, 161, 105);               // Green
+    return RGB(50, 240, 180);               // Green
   };
   auto ramColor = [](float t) {
     if (t > 70) return RGB(230, 50, 50);
     if (t > 55) return RGB(230, 200, 50);
-    return RGB(56, 161, 105);
+    return RGB(50, 240, 180);
   };
   auto diskColor = [](float t) {
     if (t > 80) return RGB(230, 50, 50);
     if (t > 70) return RGB(230, 200, 50);
-    return RGB(56, 161, 105);
+    return RGB(50, 240, 180);
   };
 
   auto metricRow = [&](int y, const wchar_t *label, const wchar_t *value,
@@ -761,7 +800,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   // === Card 3: AMD PBO ===
   y += 4;
   int card3y = y;
-  cardBg(y, 22 + 24 + 20);
+  cardBg(y, 22 + 24 + 20 + 48);
   cardTitle(y, L"AMD PBO");
   y += 24;
   int co = hal.GetCachedAmdCurveOptimizer();
@@ -850,63 +889,50 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   }
   y += 20;
 
+  // CPU Temp Limit (Tctl) pill row.
+  {
+    RECT sr = { kCardPad + 12, y, w - kCardPad - 12, y + 16 };
+    SetTextColor(mem, RGB(235, 235, 240));
+    SelectObject(mem, m_normFont);
+    DrawTextW(mem, L"CPU Temp Limit", -1, &sr,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+  }
+  y += 18;
+  {
+    int tctl = FanService::Get().GetOverlayConfig().tctlLimit;
+    static const wchar_t *tctlLabels[] = {L"Auto", L"95\u00B0", L"90\u00B0",
+                                          L"85\u00B0"};
+    int tctlIdx = tctl == 95 ? 1 : tctl == 90 ? 2 : tctl == 85 ? 3 : 0;
+    pillRow(y, 4, tctlLabels, tctlIdx, m_tctlPill, kCardPad + 12,
+            w - kCardPad - 12);
+  }
+  y += 30;
+
   // === Card 4: System ===
   y += 4;
   int card4y = y;
-  cardBg(y, 210);
+  cardBg(y, 268);
   cardTitle(y, L"System Options");
   y += 26;
 
   toggleSwitch(y, L"80% Battery Care Mode",
                OmenHal::Get().GetBatteryChargeLimit() <= 80, 0);
   y += kRowH + 4;
-  toggleSwitch(y, L"Run on Windows Startup", AutoStart(), 1);
+  toggleSwitch(y, L"Auto Startup", AutoStart(), 1);
   y += kRowH + 4;
-  toggleSwitch(y, L"Minimize to Tray on Close",
+  toggleSwitch(y, L"Close to tray",
                FanService::Get().GetOverlayConfig().minimizeOnClose, 2);
   y += kRowH + 4;
+  toggleSwitch(y, L"API Server", FanService::Get().GetOverlayConfig().apiEnabled, 5);
+  y += kRowH + 4;
 
-  // Show HUD + HUD Passive on one line
-  {
-    int half = (w - 2 * kCardPad - 24) / 2;
-    auto miniSwitch = [&](int x0, int labelW, const wchar_t *label, bool on, int slot) {
-      int swW = 28, swH = 16;
-      int swX = x0 + labelW + 4;
-      int swY = y + (kRowH - swH) / 2;
-
-      RECT tr = { x0, y, swX - 4, y + kRowH };
-      SetTextColor(mem, RGB(235, 235, 240));
-      SelectObject(mem, m_smallFont);
-      DrawTextW(mem, label, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-      RECT sr = { swX, swY, swX + swW, swY + swH };
-      HBRUSH tb = CreateSolidBrush(on ? RGB(139, 38, 42) : RGB(36, 36, 46));
-      HGDIOBJ oldTb = SelectObject(mem, tb);
-      RoundRect(mem, sr.left, sr.top, sr.right, sr.bottom, 16, 16);
-      SelectObject(mem, oldTb);
-      DeleteObject(tb);
-
-      int thumbD = 12;
-      int thumbX = on ? (swX + swW - thumbD - 2) : (swX + 2);
-      int thumbY = swY + 2;
-      HBRUSH thb = CreateSolidBrush(RGB(255, 255, 255));
-      HGDIOBJ oldThb = SelectObject(mem, thb);
-      Ellipse(mem, thumbX, thumbY, thumbX + thumbD, thumbY + thumbD);
-      SelectObject(mem, oldThb);
-      DeleteObject(thb);
-
-      m_chk[slot][0] = y;
-      m_chk[slot][1] = y + kRowH;
-      m_chk[slot][2] = x0;
-      m_chk[slot][3] = swX + swW + 4;
-    };
-
-    miniSwitch(kCardPad + 12, half - 36, L"Show HUD",
-               FanService::Get().GetOverlayConfig().show, 3);
-    miniSwitch(kCardPad + 12 + half, half - 36, L"HUD Passive",
+  // Show HUD + HUD Passive — full-width rows (side-by-side halves were too
+  // narrow for the 34px switches and collided).
+  toggleSwitch(y, L"Show HUD", FanService::Get().GetOverlayConfig().show, 3);
+  y += kRowH + 4;
+  toggleSwitch(y, L"HUD Passive",
                FanService::Get().GetOverlayConfig().hudPassthrough, 4);
-  }
-  y += kRowH + 2;
+  y += kRowH + 4;
 
   // Opacity slider.
   {
@@ -966,8 +992,8 @@ void MainWindowWin32::OnPaint(HDC hdc) {
                 m_btnFlush[1] };
     bool isFlushed = (m_flushFeedbackTicks > 0);
     COLORREF btnBg = isFlushed ? RGB(20, 52, 36) : RGB(28, 28, 38);
-    COLORREF btnBorder = isFlushed ? RGB(56, 161, 105) : RGB(52, 52, 66);
-    COLORREF btnTxt = isFlushed ? RGB(70, 240, 160) : RGB(235, 235, 240);
+    COLORREF btnBorder = isFlushed ? RGB(50, 240, 180) : RGB(52, 52, 66);
+    COLORREF btnTxt = isFlushed ? RGB(50, 240, 180) : RGB(235, 235, 240);
 
     HBRUSH b = CreateSolidBrush(btnBg);
     HBRUSH old = (HBRUSH)SelectObject(mem, b);
@@ -993,6 +1019,9 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   (void)card2y;
   (void)card3y;
   (void)card4y;
+
+  m_requiredClientH = m_btnFlush[1] + 10; // button bottom + margin (y is NOT
+                                          // advanced past the button)
 
   // Present
   BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);

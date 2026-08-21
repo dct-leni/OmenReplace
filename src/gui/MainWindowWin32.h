@@ -36,7 +36,9 @@ private:
   int m_btnFlush[4];
   int m_btnCoMinus[4]; // [y0,y1,x0,x1]
   int m_btnCoPlus[4];  // [y0,y1,x0,x1]
-  int m_chk[5][4];  // [slot][y0,y1,x0,x1]: battery, autostart, minimize, showhud, passive
+  int m_tctlPill[4][4]; // Auto | 95 | 90 | 85
+  // [slot][y0,y1,x0,x1]: battery, autostart, minimize, showhud, passive, api
+  int m_chk[6][4];
 
   HWND m_hwnd = nullptr;
   UINT_PTR m_timerId = 0;
@@ -45,6 +47,8 @@ private:
   int m_dragTrack = 0;           // 1 = CO, 2 = opacity
   int m_previewCo = 0;           // CO preview during drag (not yet applied)
   int m_flushFeedbackTicks = 0;  // > 0 while showing "Flushed!" feedback
+  int m_requiredClientH = 0;     // measured content height (set by OnPaint)
+  bool m_autoSized = false;      // window grown to fit content once
   HFONT m_boldFont = nullptr;
   HFONT m_normFont = nullptr;
   HFONT m_smallFont = nullptr;

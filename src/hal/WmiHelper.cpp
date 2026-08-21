@@ -25,7 +25,7 @@ bool WmiHelper::Initialize(const std::wstring &namespc) {
       CoInitializeSecurity(NULL, -1, NULL, NULL, RPC_C_AUTHN_LEVEL_DEFAULT,
                            RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE, NULL);
   if (FAILED(hres) && hres != RPC_E_TOO_LATE) {
-    OmenLog("[OMEN] WMI security initialization failed\n");
+    OmenLog("[AMDOMEN] WMI security initialization failed\n");
     return false;
   }
 
@@ -34,7 +34,7 @@ bool WmiHelper::Initialize(const std::wstring &namespc) {
                           IID_IWbemLocator, (LPVOID *)&m_pLoc);
 
   if (FAILED(hres)) {
-    OmenLog("[OMEN] WMI locator initialization failed\n");
+    OmenLog("[AMDOMEN] WMI locator initialization failed\n");
     return false;
   }
 
@@ -44,7 +44,7 @@ bool WmiHelper::Initialize(const std::wstring &namespc) {
   SysFreeString(path);
 
   if (FAILED(hres)) {
-    OmenLog("[OMEN] WMI namespace connection failed\n");
+    OmenLog("[AMDOMEN] WMI namespace connection failed\n");
     m_pLoc->Release();
     m_pLoc = nullptr;
     return false;
@@ -56,7 +56,7 @@ bool WmiHelper::Initialize(const std::wstring &namespc) {
                            NULL, EOAC_NONE);
 
   if (FAILED(hres)) {
-    OmenLog("[OMEN] WMI proxy security initialization failed\n");
+    OmenLog("[AMDOMEN] WMI proxy security initialization failed\n");
     m_pSvc->Release();
     m_pLoc->Release();
     m_pSvc = nullptr;
@@ -65,7 +65,7 @@ bool WmiHelper::Initialize(const std::wstring &namespc) {
   }
 
   m_initialized = true;
-  OmenLog("[OMEN] WMI initialize ok\n");
+  OmenLog("[AMDOMEN] WMI initialize ok\n");
   return true;
 }
 

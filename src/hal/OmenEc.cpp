@@ -472,17 +472,17 @@ bool OmenEc::SmbusWriteByte(uint8_t addr7, uint8_t cmd, uint8_t value) {
 
 bool OmenEc::EnableSmbusPci() {
   if (!m_smbusPawn || !m_smbusPawn->IsLoaded()) {
-    OmenLog("[OMEN] smbus module not loaded\n");
+    OmenLog("[AMDOMEN] smbus module not loaded\n");
     return false;
   }
 
   // Probe identity to confirm the module sees the KernCZ SMBus controller.
   std::vector<uint64_t> in, out(3, 0);
   if (!m_smbusPawn->Execute("ioctl_identity", in, out)) {
-    OmenLog("[OMEN] smbus ioctl_identity failed\n");
+    OmenLog("[AMDOMEN] smbus ioctl_identity failed\n");
     return false;
   }
-  OmenLog("[OMEN] smbus identity out_size=%d base=%d type=%d vid=0x%x\n",
+  OmenLog("[AMDOMEN] smbus identity out_size=%d base=%d type=%d vid=0x%x\n",
           (int)out.size(), (int)(out.size() > 1 ? out[1] : 0),
           (int)(out.size() > 0 ? out[0] : 0),
           (int)(out.size() > 2 ? out[2] : 0));
@@ -498,21 +498,21 @@ bool OmenEc::EnableSmbusPci() {
       if (SmbusReadByte((uint8_t)spd, 0x00, b)) {
         m_smbusPort = SMBUS_PORTS[pi];
         m_smbusSpdAddr = (uint8_t)spd;
-        OmenLog("[OMEN] smbus SPD FOUND port=%d addr=0x%x byte0=0x%x\n",
+        OmenLog("[AMDOMEN] smbus SPD FOUND port=%d addr=0x%x byte0=0x%x\n",
                 m_smbusPort, m_smbusSpdAddr, b);
         // DDR5: select page 0 via MREG_VIRTUAL_PAGE (0x0B), then check the
         // thermal sensor enabled bit (0x1A == 0 means enabled).
         SmbusWriteByte(m_smbusSpdAddr, 0x0B, 0x00);
         uint8_t en = 0xFF;
         if (SmbusReadByte(m_smbusSpdAddr, 0x1A, en)) {
-          OmenLog("[OMEN] smbus DDR5 thermal_enabled_reg=0x1A val=0x%x (%s)\n",
+          OmenLog("[AMDOMEN] smbus DDR5 thermal_enabled_reg=0x1A val=0x%x (%s)\n",
                   en, en == 0 ? "ENABLED" : "disabled");
         }
         return true;
       }
     }
   }
-  OmenLog("[OMEN] smbus no SPD found on any port\n");
+  OmenLog("[AMDOMEN] smbus no SPD found on any port\n");
   return false;
 }
 
@@ -525,7 +525,7 @@ bool OmenEc::SmbusReadWord(uint8_t addr7, uint8_t cmd, uint16_t &val) {
                               I2C_SMBUS_WORD_DATA};
   std::vector<uint64_t> out(1, 0);
   if (!m_smbusPawn->Execute("ioctl_smbus_xfer", in, out)) {
-    OmenLog("[OMEN] smbus_xfer fail addr=0x%x cmd=0x%x\n", addr7, cmd);
+    OmenLog("[AMDOMEN] smbus_xfer fail addr=0x%x cmd=0x%x\n", addr7, cmd);
     return false;
   }
   val = (uint16_t)(out[0] & 0xFFFF);

@@ -3,6 +3,7 @@ build/
 output/
 CMakeFiles/
 CMakeLists.txt
+rust/
 
 # Cache & Toolchain Cache Directories
 .cache/

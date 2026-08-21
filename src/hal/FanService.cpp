@@ -52,15 +52,18 @@ void FanService::SaveConfig() {
   j["amd_curve_optimizer"] = PowerControl::Get().GetCachedAmdCurveOptimizer();
   j["battery_limit"] = m_overlayConfig.batteryLimit;
   j["minimize_on_close"] = m_overlayConfig.minimizeOnClose;
+  j["log_enabled"] = m_overlayConfig.logEnabled;
 
   nlohmann::json &hud = j["hud"];
   hud["show"] = m_overlayConfig.show;
   hud["passthrough"] = m_overlayConfig.hudPassthrough;
-  hud["opacity"] = (float)(std::round(m_overlayConfig.opacity * 100.0f) / 100.0f);
+  hud["opacity"] = std::round((double)m_overlayConfig.opacity * 100.0) / 100.0;
   hud["pos_x"] = (int)std::round(m_overlayConfig.posX);
   hud["pos_y"] = (int)std::round(m_overlayConfig.posY);
   hud["size_w"] = (int)std::round(m_overlayConfig.sizeW);
   hud["size_h"] = (int)std::round(m_overlayConfig.sizeH);
+  hud["log_enabled"] = m_overlayConfig.logEnabled;
+  hud["tctl_limit"] = m_overlayConfig.tctlLimit;
 
   nlohmann::json &api = j["api"];
   api["enabled"] = m_overlayConfig.apiEnabled;
@@ -87,7 +90,7 @@ void FanService::LoadConfig() {
           mode != (int)FanControlMode::AppMode)
         mode = (int)FanControlMode::Auto;
       m_controlMode = static_cast<FanControlMode>(mode);
-      LogFanEvent("[OMEN] config fan_mode=%d\n", mode);
+      LogFanEvent("[AMDOMEN] config fan_mode=%d\n", mode);
     }
 
     if (j.contains("fan_profile")) {
@@ -105,6 +108,9 @@ void FanService::LoadConfig() {
 
     if (j.contains("minimize_on_close"))
       m_overlayConfig.minimizeOnClose = j["minimize_on_close"].get<bool>();
+
+    if (j.contains("log_enabled"))
+      m_overlayConfig.logEnabled = j["log_enabled"].get<bool>();
 
     if (j.contains("amd_curve_optimizer")) {
       int val = j["amd_curve_optimizer"].get<int>();
@@ -124,6 +130,12 @@ void FanService::LoadConfig() {
       if (h.contains("pos_y")) m_overlayConfig.posY = h["pos_y"].get<float>();
       if (h.contains("size_w")) m_overlayConfig.sizeW = h["size_w"].get<float>();
       if (h.contains("size_h")) m_overlayConfig.sizeH = h["size_h"].get<float>();
+      if (h.contains("tctl_limit")) {
+        int v = h["tctl_limit"].get<int>();
+        if (v != 0 && (v < 75 || v > 105))
+          v = 0;
+        m_overlayConfig.tctlLimit = v;
+      }
 
       // Legacy fallbacks if nested inside overlay
       if (!j.contains("battery_limit") && h.contains("battery_limit"))
@@ -242,7 +254,7 @@ void FanService::Update() {
   static FanControlMode lastLoggedMode = FanControlMode::Auto;
   static bool modeWasLogged = false;
   if (!modeWasLogged || mode != lastLoggedMode) {
-    LogFanEvent("[OMEN] fan_mode active=%d\n", (int)mode);
+    LogFanEvent("[AMDOMEN] fan_mode active=%d\n", (int)mode);
     lastLoggedMode = mode;
     modeWasLogged = true;
   }
@@ -250,7 +262,7 @@ void FanService::Update() {
     // Never assert manual EC/WMI control until worker COM and WMI are ready.
     m_controlMode = FanControlMode::Auto;
     mode = FanControlMode::Auto;
-    LogFanEvent("[OMEN] fan_control readiness_failed mode=%d\n", (int)mode);
+    LogFanEvent("[AMDOMEN] fan_control readiness_failed mode=%d\n", (int)mode);
     FanController::Get().RestoreBios();
     m_lastAppliedFan1 = -1;
     m_lastAppliedFan2 = -1;
@@ -277,16 +289,41 @@ void FanService::Update() {
     if (now - m_lastTargetUpdate >= 2000 || m_lastTargetUpdate == 0) {
       if (mode == FanControlMode::AppMode) {
         float maxTemp = std::max(m_avgCpu, m_avgGpu);
-        // Thermal safety: force 100% fan above 90°C regardless of profile.
+        // Thermal safety: force 100% fans above 90°C regardless of profile
+        // and ramp limits.
         if (maxTemp > 90.0f) {
           m_fan1Target = 100;
           m_fan2Target = 100;
+          m_heldPidTarget = -1;
         } else {
-          int cpuTarget = m_pid.Compute(maxTemp, now);
-          m_fan1Target = cpuTarget;
-          m_fan2Target = std::max(m_pid.minSpeed, cpuTarget - 10);
+          // Deadband: hold the last PID output while the temp sits inside
+          // [setpoint-3, setpoint+2] so fans don't hunt around the setpoint.
+          bool outsideBand =
+              m_heldPidTarget < 0 || maxTemp > m_pid.setpoint + 2.0f ||
+              maxTemp < m_pid.setpoint - 3.0f;
+          if (outsideBand)
+            m_heldPidTarget = m_pid.Compute(maxTemp, now);
+
+          // Ramp limiter: cap per-tick change for softer acoustics. The CPU
+          // and GPU share heatpipes on this chassis, so both fans spin at the
+          // same target. Performance/Turbo attacks faster; emergencies (>90°C)
+          // bypass via the branch above.
+          PowerMode pm = PowerControl::Get().GetCurrentMode();
+          int maxStep = (pm == PowerMode::Performance || pm == PowerMode::Turbo)
+                            ? 30
+                            : 12;
+          int prev = m_fan1Target;
+          int target = m_heldPidTarget;
+          if (prev > 0 && prev <= 100) {
+            if (target > prev + maxStep)
+              target = prev + maxStep;
+            else if (target < prev - maxStep)
+              target = prev - maxStep;
+          }
+          m_fan1Target = std::clamp(target, m_pid.minSpeed, m_pid.maxSpeed);
+          m_fan2Target = m_fan1Target;
         }
-        LogFanEvent("[OMEN] fan_targets cpu=%d gpu=%d\n", m_fan1Target,
+        LogFanEvent("[AMDOMEN] fan_targets cpu=%d gpu=%d\n", m_fan1Target,
                     m_fan2Target);
       }
       m_lastTargetUpdate = now;
@@ -312,7 +349,7 @@ void FanService::Update() {
       // consistently while fan-level command 0x2E succeeds, so do not make
       // active control depend on unsupported countdown renewal.
       FanController::Get().Heartbeat();
-      LogFanEvent("[OMEN] fan_heartbeat ec_sent=1 wmi_countdown=disabled\n");
+      LogFanEvent("[AMDOMEN] fan_heartbeat ec_sent=1 wmi_countdown=disabled\n");
       lastEcPing = nowHb;
     }
 
@@ -328,7 +365,7 @@ void FanService::Update() {
         // Full re-assert: EC registers + WMI (defeats BIOS reset)
         bool wmiOk = FanController::Get().AssertTargets(m_fan1Target,
                                                         m_fan2Target);
-        LogFanEvent("[OMEN] fan_write cpu=%d gpu=%d wmi_ok=%d\n",
+        LogFanEvent("[AMDOMEN] fan_write cpu=%d gpu=%d wmi_ok=%d\n",
                     m_fan1Target, m_fan2Target, wmiOk ? 1 : 0);
         m_fanControlHealthy = wmiOk;
         m_lastAppliedFan1 = m_fan1Target;
@@ -359,14 +396,14 @@ void FanService::SetControlMode(FanControlMode mode) {
                                   ? FanControlMode::AppMode
                                   : FanControlMode::Auto;
   m_controlMode = normalized;
-  LogFanEvent("[OMEN] fan_mode requested=%d\n", (int)normalized);
+  LogFanEvent("[AMDOMEN] fan_mode requested=%d\n", (int)normalized);
   SaveConfig();
 }
 
 void FanService::SetFanAuto() {
   m_controlMode = FanControlMode::Auto;
   m_fanControlHealthy = false;
-  LogFanEvent("[OMEN] fan_mode forced=0\n");
+  LogFanEvent("[AMDOMEN] fan_mode forced=0\n");
   FanController::Get().RestoreBios();
   SaveConfig();
 }
@@ -374,7 +411,8 @@ void FanService::SetFanAuto() {
 void FanService::SetProfile(FanControlProfile profile) {
   m_profile = profile;
   m_pid.ApplyPreset(profile);
-  LogFanEvent("[OMEN] fan_profile=%d\n", (int)profile);
+  m_heldPidTarget = -1;
+  LogFanEvent("[AMDOMEN] fan_profile=%d\n", (int)profile);
   SaveConfig();
 }
 

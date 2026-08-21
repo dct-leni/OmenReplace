@@ -141,7 +141,7 @@ void SmartHelper::UpdateTemps() {
             STORAGE_PROTOCOL_DATA_DESCRIPTOR *desc = (STORAGE_PROTOCOL_DATA_DESCRIPTOR *)buffer;
             ULONG dataOff = desc->ProtocolSpecificData.ProtocolDataOffset;
             ULONG dataLen = desc->ProtocolSpecificData.ProtocolDataLength;
-            OmenLog("[OMEN] disk%d %s nvme_proto_dataOff=%d dataLen=%d\n",
+            OmenLog("[AMDOMEN] disk%d %s nvme_proto_dataOff=%d dataLen=%d\n",
                     drive.Index, drive.Model.c_str(), (int)dataOff, (int)dataLen);
             if (dataLen >= sizeof(NVME_HEALTH_LOG) && dataOff > 0 &&
                 dataOff + 8 + sizeof(NVME_HEALTH_LOG) <= sizeof(buffer)) {
@@ -149,14 +149,14 @@ void SmartHelper::UpdateTemps() {
                 NVME_HEALTH_LOG *log = (NVME_HEALTH_LOG *)(buffer + dataOff + 8);
                 // Dump first 16 bytes of the raw health log for debug.
                 unsigned char *raw = (unsigned char *)log;
-                OmenLog("[OMEN] disk%d %s nvme_log_raw: %02x %02x %02x %02x %02x %02x %02x %02x "
+                OmenLog("[AMDOMEN] disk%d %s nvme_log_raw: %02x %02x %02x %02x %02x %02x %02x %02x "
                         "%02x %02x %02x %02x %02x %02x %02x %02x\n",
                         drive.Index, drive.Model.c_str(),
                         raw[0], raw[1], raw[2], raw[3], raw[4], raw[5],
                         raw[6], raw[7], raw[8], raw[9], raw[10], raw[11],
                         raw[12], raw[13], raw[14], raw[15]);
                 unsigned short k = log->CompositeTemperature;
-                OmenLog("[OMEN] disk%d %s nvme_composite_raw=0x%04x (%u) spare=%d used=%d\n",
+                OmenLog("[AMDOMEN] disk%d %s nvme_composite_raw=0x%04x (%u) spare=%d used=%d\n",
                         drive.Index, drive.Model.c_str(), k, k,
                         log->AvailableSpare, log->PercentageUsed);
                 // CompositeTemperature: 0x013B = 315 (whole Kelvin, 42°C) or

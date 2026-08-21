@@ -82,7 +82,7 @@ void TrayManager::SetupIcon(HWND hwnd) {
   m_nid.uCallbackMessage = WM_TRAYICON;
   m_nid.hIcon =
       LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1));
-  wcscpy_s(m_nid.szTip, L"OMEN Control Optimizer");
+  wcscpy_s(m_nid.szTip, L"AMDOMEN");
   Shell_NotifyIconW(NIM_ADD, &m_nid);
 }
 
