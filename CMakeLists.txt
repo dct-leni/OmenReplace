@@ -26,5 +26,5 @@ target_include_directories(AMDOMEN PRIVATE
 
 # --- Windows libraries (EC/WMI/COM) ---
 target_link_libraries(AMDOMEN PRIVATE
-    wbemuuid ole32 oleaut32 powrprof pdh psapi winmm comctl32 user32 advapi32 shell32 ws2_32
+    wbemuuid ole32 oleaut32 powrprof pdh psapi winmm comctl32 user32 advapi32 shell32 ws2_32 taskschd
 )

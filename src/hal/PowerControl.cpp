@@ -144,6 +144,95 @@ void PowerControl::InitGpuMux() {
   }
 }
 
+// ─── Wake-on-LAN (NIC magic packet, root\standardcimv2) ────────────────────
+// WakeOnMagicPacket is UInt32: 2=Enabled, 3=Disabled (CIM convention).
+// Enabled if ANY adapter reports 2.
+bool PowerControl::GetWakeOnLan() {
+  if (m_wolCached >= 0)
+    return m_wolCached == 1;
+
+  WmiHelper wmi;
+  if (!wmi.Initialize(L"root\\standardcimv2"))
+    return m_wolCached == 1; // last known / default
+
+  bool anyEnabled = false;
+  bool anySeen = false;
+  for (const auto &path : wmi.GetInstancePaths(L"MSFT_NetAdapterPowerManagementSettingData")) {
+    uint32_t v = 0;
+    if (wmi.GetUint32Property(path, L"WakeOnMagicPacket", v)) {
+      anySeen = true;
+      OmenLog("[AMDOMEN] wol %ls raw=%u\n", path.c_str(), v);
+      if (v == 2)
+        anyEnabled = true;
+    }
+  }
+  if (anySeen)
+    m_wolCached = anyEnabled ? 1 : 0;
+  return m_wolCached == 1;
+}
+
+bool PowerControl::SetWakeOnLan(bool enable) {
+  WmiHelper wmi;
+  if (!wmi.Initialize(L"root\\standardcimv2"))
+    return false;
+  uint32_t target = enable ? 2 : 3;
+  bool allOk = true;
+  for (const auto &path : wmi.GetInstancePaths(L"MSFT_NetAdapterPowerManagementSettingData")) {
+    if (!wmi.PutUint32Property(path, L"WakeOnMagicPacket", target))
+      allOk = false;
+  }
+  if (allOk)
+    m_wolCached = enable ? 1 : 0;
+  return allOk;
+}
+
+// ─── AC-line auto-switch ───────────────────────────────────────────────────
+// On battery: save current mode/profile, apply Eco + Quiet.
+// On AC: restore what was saved. Only acts on transitions.
+void PowerControl::CheckAcLine() {
+  if (!m_acEnabled)
+    return;
+
+  SYSTEM_POWER_STATUS st;
+  if (!GetSystemPowerStatus(&st))
+    return;
+  if (st.ACLineStatus != 0 && st.ACLineStatus != 1)
+    return; // unknown
+  if (st.BatteryFlag == 128)
+    return; // no battery — always treat as AC, no switching
+
+  int line = st.ACLineStatus;
+  if (m_acLastLine == -1) {
+    m_acLastLine = line; // first observation, no transition
+    return;
+  }
+  if (line == m_acLastLine)
+    return;
+  m_acLastLine = line;
+
+  if (line == 0) {
+    // Unplugged → save + Eco/Quiet.
+    m_acSavedMode = GetCurrentMode();
+    m_acSavedProfile = (int)FanService::Get().GetProfile();
+    m_acSaved = true;
+    OmenLog("[AMDOMEN] ac_switch: on battery -> eco (saved mode=%d profile=%d)\n",
+            (int)m_acSavedMode, m_acSavedProfile);
+    SetMode(PowerMode::Eco);
+    FanService::Get().SetControlMode(FanControlMode::AppMode);
+    FanService::Get().SetProfile(FanControlProfile::Quiet);
+  } else {
+    // Plugged back in → restore.
+    if (m_acSaved) {
+      OmenLog("[AMDOMEN] ac_switch: on AC -> restore mode=%d profile=%d\n",
+              (int)m_acSavedMode, m_acSavedProfile);
+      SetMode(m_acSavedMode);
+      FanService::Get().SetControlMode(FanControlMode::AppMode);
+      FanService::Get().SetProfile((FanControlProfile)m_acSavedProfile);
+      m_acSaved = false;
+    }
+  }
+}
+
 void PowerControl::CheckThermalPolicy() {
   if (m_thermalPolicy != ThermalPolicyVersion::Unknown)
     return;
@@ -410,6 +499,9 @@ void PowerControl::SetMode(PowerMode mode) {
 
   SetCpuPowerLimit(pl1, pl2);
   SetGpuPower(gpuLvl);
+  // Manual TGP override (pills) wins over the mode table until set back to Auto.
+  if (m_gpuPowerOverride >= 0 && m_gpuPowerOverride <= 2)
+    SetGpuPower((uint8_t)m_gpuPowerOverride);
 
   // 4. Send AMD SMU PPT limits
   SetAmdAllPptLimits(fastPpt, slowPpt, stapmPpt);

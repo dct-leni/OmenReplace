@@ -295,6 +295,8 @@ void ApiServer::ServerThreadFunc() {
     state["gpu_mux"] = hal.GetGpuModeInt();
     state["battery_limit"] = hal.GetBatteryChargeLimit();
     state["amd_co"] = hal.GetCachedAmdCurveOptimizer();
+    state["gpu_power"] = PowerControl::Get().GetGpuPowerOverride();
+    state["wake_on_lan"] = PowerControl::Get().GetWakeOnLan();
     j["state"] = state;
 
     res.set_content(j.dump(), "application/json");
@@ -352,6 +354,24 @@ void ApiServer::ServerThreadFunc() {
       } else if (action == "set_gpu_mode") {
         cmd.action = ApiAction::SetGpuMode;
         cmd.intValue = std::clamp(j.value("value", 0), 0, 1);
+      } else if (action == "set_gpu_power") {
+        // -1 = Auto (mode table), 0..2 = Min/Med/Max TGP override.
+        int val = j.value("value", -1);
+        if (val < -1 || val > 2) val = -1;
+        PowerControl::Get().SetGpuPowerOverride(val);
+        if (val >= 0)
+          PowerControl::Get().SetGpuPower((uint8_t)val);
+        auto &cfg = FanService::Get().GetOverlayConfig();
+        cfg.gpuPowerLevel = val;
+        FanService::Get().SaveConfig();
+        res.set_content("{\"status\":\"ok\"}", "application/json");
+        return;
+      } else if (action == "set_wol") {
+        bool on = j.value("value", 0) != 0;
+        bool ok = PowerControl::Get().SetWakeOnLan(on);
+        res.set_content(ok ? "{\"status\":\"ok\"}" : "{\"error\":\"WMI write failed\"}",
+                        "application/json");
+        return;
       } else {
         res.status = 400;
         res.set_content("{\"error\":\"Unknown action\"}", "application/json");

@@ -1,9 +1,12 @@
 #include "MainWindowWin32.h"
 
 #include <algorithm>
+#include <atomic>
+#include <commctrl.h>
 #include <cstdio>
 #include <dwmapi.h>
 #include <string>
+#include <thread>
 #include <vector>
 #include <windowsx.h>
 
@@ -14,9 +17,13 @@
 #include "../hal/PowerControl.h"
 #include "HudWindow.h"
 
+#include <comdef.h>
+#include <taskschd.h>
+
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "taskschd.lib")
 
 namespace {
 constexpr int kWidth = 306;
@@ -24,42 +31,228 @@ constexpr int kHeight = 735;
 constexpr int kCardPad = 8;
 constexpr int kRowH = 22;
 
-bool AutoStart() {
-  HKEY key;
-  if (RegOpenKeyExW(HKEY_CURRENT_USER,
-                    L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0,
-                    KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
+// ── Autostart via Windows Task Scheduler COM API (taskschd.h) ────────────────
+// A scheduled task with RunLevel=Highest starts the app elevated WITHOUT a
+// UAC prompt at logon, and its failure policy restarts it after a crash.
+static std::atomic<int> s_autostartCache{-1};
+static std::atomic<bool> s_autostartBusy{false};
+
+static bool QueryAutoStartTaskNative() {
+  ITaskService *pService = nullptr;
+  HRESULT hr = CoCreateInstance(CLSID_TaskScheduler, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_ITaskService, (void **)&pService);
+  if (FAILED(hr)) return false;
+
+  hr = pService->Connect(_variant_t(), _variant_t(), _variant_t(), _variant_t());
+  if (FAILED(hr)) {
+    pService->Release();
     return false;
-  bool on = RegQueryValueExW(key, L"AMDOMEN", nullptr, nullptr,
-                             nullptr, nullptr) == ERROR_SUCCESS;
-  RegCloseKey(key);
-  return on;
+  }
+
+  ITaskFolder *pRootFolder = nullptr;
+  hr = pService->GetFolder(_bstr_t(L"\\"), &pRootFolder);
+  if (FAILED(hr)) {
+    pService->Release();
+    return false;
+  }
+
+  IRegisteredTask *pTask = nullptr;
+  hr = pRootFolder->GetTask(_bstr_t(L"AMDOMEN"), &pTask);
+  bool exists = SUCCEEDED(hr) && (pTask != nullptr);
+
+  if (pTask) pTask->Release();
+  pRootFolder->Release();
+  pService->Release();
+  OmenLog("[AMDOMEN] autostart query native exists=%d\n", exists ? 1 : 0);
+  return exists;
 }
 
-void ToggleAutoStart() {
-  HKEY key;
-  if (RegOpenKeyExW(HKEY_CURRENT_USER,
-                    L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0,
-                    KEY_SET_VALUE, &key) != ERROR_SUCCESS)
-    return;
-  if (AutoStart()) {
-    RegDeleteValueW(key, L"AMDOMEN");
-  } else {
-    wchar_t path[MAX_PATH];
-    if (GetModuleFileNameW(nullptr, path, MAX_PATH)) {
-      std::wstring cmd = L"\"";
-      cmd += path;
-      cmd += L"\"";
-      RegSetValueExW(key, L"AMDOMEN", 0, REG_SZ,
-                     (const BYTE *)cmd.c_str(),
-                     (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
-    }
+static bool RegisterAutoStartTaskNative(const wchar_t *exePath) {
+  ITaskService *pService = nullptr;
+  HRESULT hr = CoCreateInstance(CLSID_TaskScheduler, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_ITaskService, (void **)&pService);
+  if (FAILED(hr)) return false;
+
+  hr = pService->Connect(_variant_t(), _variant_t(), _variant_t(), _variant_t());
+  if (FAILED(hr)) { pService->Release(); return false; }
+
+  ITaskFolder *pRootFolder = nullptr;
+  hr = pService->GetFolder(_bstr_t(L"\\"), &pRootFolder);
+  if (FAILED(hr)) { pService->Release(); return false; }
+
+  ITaskDefinition *pTask = nullptr;
+  hr = pService->NewTask(0, &pTask);
+  if (FAILED(hr)) {
+    pRootFolder->Release();
+    pService->Release();
+    return false;
   }
-  RegCloseKey(key);
+
+  // 1. Registration Info
+  IRegistrationInfo *pRegInfo = nullptr;
+  if (SUCCEEDED(pTask->get_RegistrationInfo(&pRegInfo))) {
+    pRegInfo->put_Author(_bstr_t(L"AMDOMEN"));
+    pRegInfo->put_Description(_bstr_t(L"AMDOMEN Fan and Power Control Autostart"));
+    pRegInfo->Release();
+  }
+
+  // 2. Principal: Run with Highest privileges (no UAC prompt at logon)
+  IPrincipal *pPrincipal = nullptr;
+  if (SUCCEEDED(pTask->get_Principal(&pPrincipal))) {
+    pPrincipal->put_RunLevel(TASK_RUNLEVEL_HIGHEST);
+    pPrincipal->put_LogonType(TASK_LOGON_INTERACTIVE_TOKEN);
+    pPrincipal->Release();
+  }
+
+  // 3. Settings: battery support, restart policy, no execution time limit
+  ITaskSettings *pSettings = nullptr;
+  if (SUCCEEDED(pTask->get_Settings(&pSettings))) {
+    pSettings->put_DisallowStartIfOnBatteries(VARIANT_FALSE);
+    pSettings->put_StopIfGoingOnBatteries(VARIANT_FALSE);
+    pSettings->put_ExecutionTimeLimit(_bstr_t(L"PT0S")); // Infinite
+    pSettings->put_RestartCount(10);
+    pSettings->put_RestartInterval(_bstr_t(L"PT1M"));    // 1 minute
+    pSettings->Release();
+  }
+
+  // 4. Logon Trigger: trigger when user logs on
+  ITriggerCollection *pTriggers = nullptr;
+  if (SUCCEEDED(pTask->get_Triggers(&pTriggers))) {
+    ITrigger *pTrigger = nullptr;
+    if (SUCCEEDED(pTriggers->Create(TASK_TRIGGER_LOGON, &pTrigger))) {
+      pTrigger->Release();
+    }
+    pTriggers->Release();
+  }
+
+  // 5. Action: launch executable
+  IActionCollection *pActions = nullptr;
+  if (SUCCEEDED(pTask->get_Actions(&pActions))) {
+    IAction *pAction = nullptr;
+    if (SUCCEEDED(pActions->Create(TASK_ACTION_EXEC, &pAction))) {
+      IExecAction *pExecAction = nullptr;
+      if (SUCCEEDED(pAction->QueryInterface(IID_IExecAction, (void **)&pExecAction))) {
+        pExecAction->put_Path(_bstr_t(exePath));
+        pExecAction->Release();
+      }
+      pAction->Release();
+    }
+    pActions->Release();
+  }
+
+  // 6. Commit registration
+  IRegisteredTask *pRegisteredTask = nullptr;
+  hr = pRootFolder->RegisterTaskDefinition(
+      _bstr_t(L"AMDOMEN"), pTask, TASK_CREATE_OR_UPDATE,
+      _variant_t(), _variant_t(), TASK_LOGON_INTERACTIVE_TOKEN,
+      _variant_t(L""), &pRegisteredTask);
+
+  if (SUCCEEDED(hr) && pRegisteredTask) pRegisteredTask->Release();
+  pTask->Release();
+  pRootFolder->Release();
+  pService->Release();
+  OmenLog("[AMDOMEN] autostart register native hr=0x%08lX\n", hr);
+  return SUCCEEDED(hr);
+}
+
+static bool DeleteAutoStartTaskNative() {
+  ITaskService *pService = nullptr;
+  HRESULT hr = CoCreateInstance(CLSID_TaskScheduler, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_ITaskService, (void **)&pService);
+  if (FAILED(hr)) return false;
+
+  hr = pService->Connect(_variant_t(), _variant_t(), _variant_t(), _variant_t());
+  if (FAILED(hr)) { pService->Release(); return false; }
+
+  ITaskFolder *pRootFolder = nullptr;
+  hr = pService->GetFolder(_bstr_t(L"\\"), &pRootFolder);
+  if (FAILED(hr)) { pService->Release(); return false; }
+
+  hr = pRootFolder->DeleteTask(_bstr_t(L"AMDOMEN"), 0);
+  pRootFolder->Release();
+  pService->Release();
+  OmenLog("[AMDOMEN] autostart delete native hr=0x%08lX\n", hr);
+  return SUCCEEDED(hr) || hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+}
+
+static bool AutoStart() {
+  int cached = s_autostartCache.load();
+  if (cached >= 0)
+    return cached == 1;
+  return false;
+}
+
+static void PrimeAutoStartAsync(HWND hwnd) {
+  if (s_autostartCache.load() >= 0)
+    return;
+  std::thread([hwnd]() {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    bool on = QueryAutoStartTaskNative();
+    s_autostartCache.store(on ? 1 : 0);
+    if (hwnd && IsWindow(hwnd)) {
+      InvalidateRect(hwnd, nullptr, FALSE);
+    }
+    CoUninitialize();
+  }).detach();
+}
+
+static void ToggleAutoStart() {
+  if (s_autostartBusy.exchange(true))
+    return; // a toggle is already in flight
+  bool turningOn = !AutoStart();
+  s_autostartCache.store(turningOn ? 1 : 0); // optimistic, corrected below
+
+  std::thread([turningOn]() {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (!turningOn) {
+      DeleteAutoStartTaskNative();
+      s_autostartCache.store(0);
+      s_autostartBusy.store(false);
+      CoUninitialize();
+      return;
+    }
+    wchar_t path[MAX_PATH];
+    if (!GetModuleFileNameW(nullptr, path, MAX_PATH)) {
+      s_autostartCache.store(0);
+      s_autostartBusy.store(false);
+      CoUninitialize();
+      return;
+    }
+    // Migrate away from the legacy registry Run entry, if present.
+    HKEY key;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0,
+                      KEY_SET_VALUE, &key) == ERROR_SUCCESS) {
+      RegDeleteValueW(key, L"AMDOMEN");
+      RegCloseKey(key);
+    }
+
+    bool ok = RegisterAutoStartTaskNative(path);
+    s_autostartCache.store(ok ? 1 : 0);
+    s_autostartBusy.store(false);
+    CoUninitialize();
+  }).detach();
 }
 } // namespace
 
-MainWindowWin32::MainWindowWin32() { RegisterClassOnce(); }
+MainWindowWin32::MainWindowWin32() {
+  RegisterClassOnce();
+  if (!m_boldFont)
+    m_boldFont = CreateFontW(-15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH, L"Segoe UI");
+  if (!m_normFont)
+    m_normFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH, L"Segoe UI");
+  if (!m_smallFont)
+    m_smallFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                              CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                              DEFAULT_PITCH, L"Segoe UI");
+}
 
 MainWindowWin32::~MainWindowWin32() {
   if (m_boldFont) DeleteObject(m_boldFont);
@@ -100,19 +293,10 @@ void MainWindowWin32::Show() {
                         sizeof(dark));
   ShowWindow(m_hwnd, SW_SHOW);
   UpdateWindow(m_hwnd); // force immediate first paint
-  m_timerId = SetTimer(m_hwnd, 1, 2000, nullptr);
-  m_boldFont = CreateFontW(-15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                           CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                           DEFAULT_PITCH, L"Segoe UI");
-  m_normFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                           CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                           DEFAULT_PITCH, L"Segoe UI");
-  m_smallFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                            CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                            DEFAULT_PITCH, L"Segoe UI");
+  if (!m_timerId) m_timerId = SetTimer(m_hwnd, 1, 2000, nullptr);
+
+  // Prime the autostart cache asynchronously in background — never blocks UI thread.
+  PrimeAutoStartAsync(m_hwnd);
 }
 
 void MainWindowWin32::Hide() { if (m_hwnd) ShowWindow(m_hwnd, SW_HIDE); }
@@ -179,9 +363,34 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
   case WM_LBUTTONDOWN:
     if (self) self->OnLButtonDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
     return 0;
-  case WM_MOUSEMOVE:
-    if (self && self->m_draggingSlider)
-      self->OnLButtonDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+  case WM_MOUSEMOVE: {
+    if (self) {
+      if (self->m_draggingSlider) {
+        self->OnLButtonDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+      } else {
+        // Hover detection for the GPU Power hint.
+        int mx = GET_X_LPARAM(lp), my = GET_Y_LPARAM(lp);
+        bool inside = mx >= self->m_gpHoverRect[2] && mx <= self->m_gpHoverRect[3] &&
+                      my >= self->m_gpHoverRect[0] && my <= self->m_gpHoverRect[1];
+        if (inside != self->m_hoverGp) {
+          self->m_hoverGp = inside;
+          InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        if (inside && !self->m_trackMouse) {
+          TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hwnd, 0};
+          TrackMouseEvent(&tme);
+          self->m_trackMouse = true;
+        }
+      }
+    }
+    return 0;
+  }
+  case WM_MOUSELEAVE:
+    if (self) {
+      self->m_hoverGp = false;
+      self->m_trackMouse = false;
+      InvalidateRect(hwnd, nullptr, FALSE);
+    }
     return 0;
   case WM_LBUTTONUP:
     if (self && self->m_draggingSlider) {
@@ -228,6 +437,19 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
           }
         }
       }
+      // GPU power pills + System collapse title
+      if (!isInteractive) {
+        for (int i = 0; i < 4 && !isInteractive; i++) {
+          if (x >= self->m_gpPill[i][2] && x <= self->m_gpPill[i][3] &&
+              y >= self->m_gpPill[i][0] && y <= self->m_gpPill[i][1]) {
+            isInteractive = true;
+          }
+        }
+        if (x >= self->m_sysTitle[2] && x <= self->m_sysTitle[3] &&
+            y >= self->m_sysTitle[0] && y <= self->m_sysTitle[1]) {
+          isInteractive = true;
+        }
+      }
       // PBO steppers & track
       if (!isInteractive) {
         if ((x >= self->m_btnCoMinus[2] && x <= self->m_btnCoMinus[3] &&
@@ -248,7 +470,7 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
       }
       // Toggle switches
       if (!isInteractive) {
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 9; i++) {
           if (x >= self->m_chk[i][2] && x <= self->m_chk[i][3] &&
               y >= self->m_chk[i][0] && y <= self->m_chk[i][1]) {
             isInteractive = true; break;
@@ -290,6 +512,23 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
       return 0;
     }
     DestroyWindow(hwnd);
+    return 0;
+  case WM_DISPLAYCHANGE:
+    if (self) {
+      HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+      MONITORINFO mi = {sizeof(mi)};
+      if (GetMonitorInfoW(hMon, &mi)) {
+        RECT wr;
+        if (GetWindowRect(hwnd, &wr)) {
+          if (wr.left >= mi.rcWork.right || wr.right <= mi.rcWork.left ||
+              wr.top >= mi.rcWork.bottom || wr.bottom <= mi.rcWork.top) {
+            SetWindowPos(hwnd, nullptr, mi.rcWork.left + 50, mi.rcWork.top + 50,
+                         0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+          }
+        }
+      }
+      InvalidateRect(hwnd, nullptr, FALSE);
+    }
     return 0;
   }
   return DefWindowProcW(hwnd, msg, wp, lp);
@@ -334,6 +573,32 @@ void MainWindowWin32::OnLButtonDown(int x, int y) {
       InvalidateRect(m_hwnd, nullptr, FALSE);
       return;
     }
+  }
+
+  // GPU Power pills: Auto | Min | Med | Max.
+  for (int i = 0; i < 4; i++) {
+    if (x >= m_gpPill[i][2] && x <= m_gpPill[i][3] &&
+        y >= m_gpPill[i][0] && y <= m_gpPill[i][1]) {
+      static const int vals[4] = {-1, 0, 1, 2};
+      int level = vals[i];
+      PowerControl::Get().SetGpuPowerOverride(level);
+      if (level >= 0)
+        PowerControl::Get().SetGpuPower((uint8_t)level);
+      auto &cfg = FanService::Get().GetOverlayConfig();
+      cfg.gpuPowerLevel = level;
+      FanService::Get().SaveConfig();
+      InvalidateRect(m_hwnd, nullptr, FALSE);
+      return;
+    }
+  }
+
+  // System Options title: collapse/expand (session-only, always starts compact).
+  if (x >= m_sysTitle[2] && x <= m_sysTitle[3] && y >= m_sysTitle[0] &&
+      y <= m_sysTitle[1]) {
+    m_systemExpanded = !m_systemExpanded;
+    m_autoSized = false; // re-fit window height on next paint
+    InvalidateRect(m_hwnd, nullptr, FALSE);
+    return;
   }
 
   // AMD CO [-] / [+] Stepper Buttons
@@ -411,8 +676,9 @@ void MainWindowWin32::OnLButtonDown(int x, int y) {
     InvalidateRect(m_hwnd, nullptr, FALSE);
     return;
   }
-  // Checkboxes / Toggle Switches: battery, autostart, minimize, showhud, passive, api.
-  for (int i = 0; i < 6; i++) {
+  // Checkboxes / Toggle Switches: battery, autostart, minimize, showhud,
+  // passive, api, wol, autopower, gameauto.
+  for (int i = 0; i < 9; i++) {
     if (x >= m_chk[i][2] && x <= m_chk[i][3] && y >= m_chk[i][0] &&
         y <= m_chk[i][1]) {
       switch (i) {
@@ -459,6 +725,25 @@ void MainWindowWin32::OnLButtonDown(int x, int y) {
           ApiServer::Get().Start();
         else
           ApiServer::Get().Stop();
+        break;
+      }
+      case 6: {
+        // Wake-on-LAN — toggle real NIC state (cache updated on success).
+        bool cur = PowerControl::Get().GetWakeOnLan();
+        PowerControl::Get().SetWakeOnLan(!cur);
+        break;
+      }
+      case 7: {
+        auto &cfg = FanService::Get().GetOverlayConfig();
+        cfg.autoPowerSwitch = !cfg.autoPowerSwitch;
+        PowerControl::Get().SetAcEnabled(cfg.autoPowerSwitch);
+        FanService::Get().SaveConfig();
+        break;
+      }
+      case 8: {
+        auto &cfg = FanService::Get().GetOverlayConfig();
+        cfg.gameAutoProfile = !cfg.gameAutoProfile;
+        FanService::Get().SaveConfig();
         break;
       }
       }
@@ -514,7 +799,8 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   };
 
   auto cardTitle = [&](int y, const wchar_t *t) {
-    RECT tr = { kCardPad + 12, y, w - kCardPad - 12, y + 22 };
+    // 3px inset from the card's top edge.
+    RECT tr = { kCardPad + 12, y + 3, w - kCardPad - 12, y + 21 };
     SelectObject(mem, m_normFont);
     SetTextColor(mem, RGB(240, 240, 245));
     DrawTextW(mem, t, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -753,7 +1039,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   // === Card 2: Power & Fan ===
   y += 4;
   int card2y = y;
-  cardBg(y, 22 + 30 + 22 + 30 + 22 + 36 + 4);
+  cardBg(y, 204); // 4 pill rows; GPU Power row has a hover tooltip
   y += 4;
 
   // Power Modes label + pills.
@@ -795,7 +1081,30 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   static const wchar_t *muxLabels[] = {L"Hybrid", L"Discrete"};
   pillRow(y, 2, muxLabels, hal.GetGpuModeInt(), m_muxPill, kCardPad + 10,
           w - kCardPad - 10);
-  y += 36;
+  y += 30;
+
+  // GPU Power (TGP) label + pills: Auto | Min | Med | Max.
+  {
+    RECT sr = { kCardPad + 12, y, w - kCardPad - 12, y + 16 };
+    SetTextColor(mem, RGB(235, 235, 240));
+    SelectObject(mem, m_normFont);
+    DrawTextW(mem, L"GPU Power", -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+  }
+  y += 18;
+  {
+    static const wchar_t *gpLabels[] = {L"Auto", L"None", L"TGP", L"+Boost"};
+    int ov = PowerControl::Get().GetGpuPowerOverride();
+    int gpIdx = (ov >= 0 && ov <= 2) ? ov + 1 : 0;
+    pillRow(y, 4, gpLabels, gpIdx, m_gpPill, kCardPad + 10,
+            w - kCardPad - 10);
+    // Hover-hint hit area covers label + pills.
+    m_gpHoverRect[0] = y - 18;
+    m_gpHoverRect[1] = y + 28;
+    m_gpHoverRect[2] = kCardPad + 10;
+    m_gpHoverRect[3] = w - kCardPad - 10;
+  }
+  y = card2y + 204; // jump past the card background
+  y += 4;
 
   // === Card 3: AMD PBO ===
   y += 4;
@@ -908,13 +1217,31 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   }
   y += 30;
 
-  // === Card 4: System ===
+  // === Card 4: System (collapsible) ===
   y += 4;
   int card4y = y;
-  cardBg(y, 268);
+  bool sysExpanded = m_systemExpanded;
+  cardBg(y, sysExpanded ? 346 : 32);
+  // Clickable title row with chevron.
+  m_sysTitle[0] = y;
+  m_sysTitle[1] = y + 26;
+  m_sysTitle[2] = kCardPad + 10;
+  m_sysTitle[3] = w - kCardPad - 10;
   cardTitle(y, L"System Options");
+  {
+    RECT cr = { w - kCardPad - 30, y, w - kCardPad - 10, y + 22 };
+    SetTextColor(mem, RGB(154, 154, 162));
+    SelectObject(mem, m_normFont);
+    DrawTextW(mem, sysExpanded ? L"\u25B4" : L"\u25BE", -1, &cr,
+              DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+  }
   y += 26;
-
+  if (!sysExpanded) {
+    // Invalidate all toggle hit-rects while collapsed.
+    for (int i = 0; i < 9; i++) {
+      m_chk[i][0] = m_chk[i][1] = 0;
+    }
+  } else {
   toggleSwitch(y, L"80% Battery Care Mode",
                OmenHal::Get().GetBatteryChargeLimit() <= 80, 0);
   y += kRowH + 4;
@@ -924,6 +1251,14 @@ void MainWindowWin32::OnPaint(HDC hdc) {
                FanService::Get().GetOverlayConfig().minimizeOnClose, 2);
   y += kRowH + 4;
   toggleSwitch(y, L"API Server", FanService::Get().GetOverlayConfig().apiEnabled, 5);
+  y += kRowH + 4;
+  toggleSwitch(y, L"Wake on LAN", PowerControl::Get().GetWakeOnLan(), 6);
+  y += kRowH + 4;
+  toggleSwitch(y, L"Auto Power Switch",
+               FanService::Get().GetOverlayConfig().autoPowerSwitch, 7);
+  y += kRowH + 4;
+  toggleSwitch(y, L"Game Auto-Profile",
+               FanService::Get().GetOverlayConfig().gameAutoProfile, 8);
   y += kRowH + 4;
 
   // Show HUD + HUD Passive — full-width rows (side-by-side halves were too
@@ -1015,13 +1350,53 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     DeleteObject(p);
     SelectObject(mem, oldN);
   }
+  } // end expanded System card
 
   (void)card2y;
   (void)card3y;
   (void)card4y;
 
-  m_requiredClientH = m_btnFlush[1] + 10; // button bottom + margin (y is NOT
-                                          // advanced past the button)
+  // Collapsed card: m_btnFlush is stale (button not drawn) — use card bottom.
+  if (m_systemExpanded)
+    m_requiredClientH = m_btnFlush[1] + 10; // button bottom + margin
+  else
+    m_requiredClientH = card4y + 32 + 10;   // collapsed card bottom + margin
+
+  // GPU Power hover hint — floating panel drawn last so it sits on top.
+  if (m_hoverGp && m_gpHoverRect[1] > m_gpHoverRect[0]) {
+    int bx0 = m_gpHoverRect[2];
+    int bx1 = m_gpHoverRect[3];
+    int by0 = m_gpHoverRect[1] + 6;
+    int by1 = by0 + 5 * 16 + 12;
+    HBRUSH b = CreateSolidBrush(RGB(24, 24, 32));
+    HGDIOBJ oldB = SelectObject(mem, b);
+    RoundRect(mem, bx0, by0, bx1, by1, 8, 8);
+    SelectObject(mem, oldB);
+    DeleteObject(b);
+    HBRUSH nb = (HBRUSH)GetStockObject(NULL_BRUSH);
+    HPEN p = CreatePen(PS_SOLID, 1, RGB(60, 60, 74));
+    HGDIOBJ oldN = SelectObject(mem, nb);
+    HGDIOBJ oldP = SelectObject(mem, p);
+    RoundRect(mem, bx0, by0, bx1, by1, 8, 8);
+    SelectObject(mem, oldP);
+    SelectObject(mem, oldN);
+    DeleteObject(p);
+
+    const wchar_t *lines[] = {
+        L"GPU Power override",
+        L"Auto: follow the Power Mode table",
+        L"None: no TGP limit",
+        L"TGP: custom GPU power cap",
+        L"+Boost: TGP + NVIDIA Dynamic Boost"};
+    int ly = by0 + 7;
+    for (int i = 0; i < 5; i++) {
+      RECT lr = {bx0 + 12, ly, bx1 - 12, ly + 16};
+      SetTextColor(mem, i == 0 ? RGB(240, 240, 245) : RGB(180, 180, 190));
+      SelectObject(mem, i == 0 ? m_normFont : m_smallFont);
+      DrawTextW(mem, lines[i], -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+      ly += 16;
+    }
+  }
 
   // Present
   BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);

@@ -18,6 +18,25 @@ OmenHal &OmenHal::Get() {
   return instance;
 }
 
+// Foreground window covers its whole monitor without a caption style —
+// borderless/exclusive fullscreen (games, slideshow apps).
+static bool ForegroundFullscreen() {
+  HWND fg = GetForegroundWindow();
+  if (!fg)
+    return false;
+  HMONITOR mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+  MONITORINFO mi = {sizeof(mi)};
+  if (!GetMonitorInfoW(mon, &mi))
+    return false;
+  RECT wr;
+  if (!GetWindowRect(fg, &wr))
+    return false;
+  if (wr.left != mi.rcMonitor.left || wr.top != mi.rcMonitor.top ||
+      wr.right != mi.rcMonitor.right || wr.bottom != mi.rcMonitor.bottom)
+    return false;
+  return (GetWindowLongPtrW(fg, GWL_STYLE) & WS_CAPTION) == 0;
+}
+
 OmenHal::OmenHal() {}
 
 OmenHal::~OmenHal() { Shutdown(); }
@@ -229,6 +248,70 @@ void OmenHal::BackgroundLoop() {
     // Update thermal and fan services every cycle (1 second)
     ThermalService::Get().Update();
     FanService::Get().Update();
+    PowerControl::Get().CheckAcLine();
+
+    // ── Game auto-profile ────────────────────────────────────────────────
+    // Game = fullscreen foreground + GPU load > 40% sustained 5s.
+    // Exit = condition false 10s → restore mode/profile captured at entry.
+    static bool gameActive = false;
+    static int gameHighSecs = 0, gameLowSecs = 0;
+    static PowerMode gameSavedMode = PowerMode::Balanced;
+    static int gameSavedProfile = 0;
+
+    if (FanService::Get().GetOverlayConfig().gameAutoProfile) {
+      bool fullscreen = ForegroundFullscreen();
+      float gpuLoad = ThermalService::Get().GetGpuLoad();
+      if (!gameActive) {
+        if (fullscreen && gpuLoad > 40.0f) {
+          if (++gameHighSecs >= 5) {
+            gameActive = true;
+            gameHighSecs = 0;
+            gameSavedMode = PowerControl::Get().GetCurrentMode();
+            gameSavedProfile = (int)FanService::Get().GetProfile();
+            OmenLog("[AMDOMEN] game_mode enter (saved mode=%d profile=%d)\n",
+                    (int)gameSavedMode, gameSavedProfile);
+            PowerControl::Get().SetMode(PowerMode::Performance);
+            FanService::Get().SetControlMode(FanControlMode::AppMode);
+            FanService::Get().SetProfile(FanControlProfile::Cool);
+          }
+        } else {
+          gameHighSecs = 0;
+        }
+        gameLowSecs = 0;
+      } else {
+        if (!fullscreen || gpuLoad < 40.0f) {
+          if (++gameLowSecs >= 10) {
+            gameActive = false;
+            gameLowSecs = 0;
+            OmenLog("[AMDOMEN] game_mode exit -> restore mode=%d profile=%d\n",
+                    (int)gameSavedMode, gameSavedProfile);
+            PowerControl::Get().SetMode(gameSavedMode);
+            FanService::Get().SetControlMode(FanControlMode::AppMode);
+            FanService::Get().SetProfile((FanControlProfile)gameSavedProfile);
+          }
+        } else {
+          gameLowSecs = 0;
+        }
+        gameHighSecs = 0;
+      }
+    } else if (gameActive) {
+      gameActive = false;
+      PowerControl::Get().SetMode(gameSavedMode);
+      FanService::Get().SetControlMode(FanControlMode::AppMode);
+      FanService::Get().SetProfile((FanControlProfile)gameSavedProfile);
+    }
+
+    // ── HUD topmost reassert (fullscreen apps can demote it) ────────────
+    static auto lastHudAssert = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+    if (FanService::Get().GetOverlayConfig().show && ForegroundFullscreen()) {
+      auto now = std::chrono::steady_clock::now();
+      if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastHudAssert).count() > 2000) {
+        lastHudAssert = now;
+        HWND hud = FindWindowW(L"AMDOMEN_HUD_WINDOW", nullptr);
+        if (hud)
+          PostMessageW(hud, WM_APP + 50, 0, 0);
+      }
+    }
 
     // Update power control less frequently (every 5 seconds)
     // Update power control every 10 seconds to reduce expensive WMI calls.

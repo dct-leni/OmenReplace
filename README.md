@@ -1,6 +1,6 @@
 # OmenReplace (AMDOMEN Control)
 
-**OmenReplace** is an ultra-lightweight, bloat-free, native C++ replacement for the HP OMEN Gaming Hub (OGH). It provides full hardware management—fan curves, power limits, AMD Curve Optimizer undervolting, battery protection, hardware HUD overlay, and an embedded web dashboard—with **zero background telemetry**, instant startup, and a minimal memory footprint (<15 MB RAM vs 500+ MB for OGH).
+**OmenReplace** is an ultra-lightweight, bloat-free, native C++ replacement for the HP OMEN Gaming Hub (OGH). It provides full hardware management—progressive fan curves, power limits, AMD Curve Optimizer undervolting, battery protection, hardware HUD overlay, and an embedded web dashboard—with **zero background telemetry**, instant startup, and a minimal memory footprint (<15 MB RAM vs 500+ MB for OGH).
 
 ---
 
@@ -17,6 +17,7 @@
     - [2. HP BIOS WMI Interface (`hpqBIntM`)](#2-hp-bios-wmi-interface-hpqbintm)
     - [3. AMD SMU (System Management Unit)](#3-amd-smu-system-management-unit)
     - [4. Windows Power Overlay & Processor Settings](#4-windows-power-overlay--processor-settings)
+    - [5. Native Task Scheduler 2.0 COM Subsystem](#5-native-task-scheduler-20-com-subsystem)
   - [Source Code Directory Structure](#source-code-directory-structure)
   - [Key Components & Symbol Reference](#key-components--symbol-reference)
   - [Embedded Web API & Mobile Dashboard](#embedded-web-api--mobile-dashboard)
@@ -35,16 +36,39 @@
   - **Balanced**: 45W CPU PL1, Efficient Boost (`GUID_PERFBOOST=3`), EPP 50, Standard GPU TGP.
   - **Performance**: 75W CPU PL1, Aggressive Boost, EPP 0, Max GPU TGP + Dynamic Boost (PPAB).
   - **Turbo / Max**: 254W CPU PL1 (uncapped), Max GPU TGP + PPAB.
-- **❄️ Adaptive Fan Control**:
-  - PID-based fan curve control mapped to real-time CPU/GPU thermal sensors.
-  - Profiles: **Quiet**, **Balanced**, **Aggressive**, and **Max** presets.
+- **❄️ Hybrid Progressive Fan Engine**:
+  - **Piecewise Multi-Point Progressive Curves**: Replaces classical PID controllers with deterministic, calibrated thermal curves tailored for AMD Ryzen Dragon Range & Phoenix processors (`8940HX`).
+  - **Profiles**:
+    - **Default (Normal Mode)**: Whisper quiet idle (18% at ≤40°C), progressive smooth ramp (38% at 60°C, 70% at 80°C), scaling to 100% at 93°C.
+    - **Quiet (Silence Priority)**: Keeps fans ≤45% up to 78°C for quiet office/browsing, only ramping if approaching thermal limits (100% at 95°C emergency).
+    - **Cool (Max Performance)**: 30% baseline pre-cooling, ramping aggressively to 100% at 80°C to maximize CPU/GPU boost clocks and prevent thermal throttling.
+  - **Instant Spike Protection**: Blends die temperature with smoothed average. If a sudden spike occurs ($T_{\text{cur}} > T_{\text{avg}} + 3^\circ\text{C}$), fan speed ramps immediately to arrest heat-soak.
+  - **Asymmetric Slew-Rate Limiting**: Immediate ramp-up on heat spikes; smoothly capped **2.5%/sec ramp-down** to prevent fan hunting and acoustic revving.
+  - **Hardware Delta Suppression ($\ge 2\%$)**: Hardware I/O writes (EC and WMI) are skipped if target speed hasn't changed by at least 2%, reducing ACPI bus traffic and background CPU load to **0.0%**.
+- **🚀 Native Task Scheduler Autostart (COM `ITaskService`)**:
+  - In-process registration using the official Windows Task Scheduler 2.0 COM API (`taskschd.h` / `taskschd.lib`). Starts elevated with `TASK_RUNLEVEL_HIGHEST` **without UAC prompts** at logon, with crash restart policy (10 retries, 1 min interval). Zero subprocess spawns, zero temporary scripts, sub-millisecond execution.
+- **🛡️ Display Sleep & Taskbar Resilience**:
+  - Listens for `RegisterWindowMessageW(L"TaskbarCreated")` to automatically recreate the system tray icon if Windows Explorer restarts or monitors wake from sleep.
+  - Enforces a single instance via named mutex (`Local\AMDOMEN_SingleInstanceMutex`), automatically restoring the running window if launched again.
 - **📉 AMD Curve Optimizer (PBO Undervolting)**:
   - Real-time all-core undervolting (-30 to +30 counts) via direct AMD SMU mailbox communication. Includes quick `[-]` / `[+]` stepping.
-- **🖥️ Hardware HUD Overlay**:
-  - Sleek, semi-transparent obsidian HUD with CPU temp/load, GPU temp/load, and RAM usage glow bars.
-  - Real-time magnetic screen border snapping (24px threshold) and click-through capability.
+- **🌡️ CPU Temp Limit (Tctl)**:
+  - MP1 SMU Tctl max presets (`Auto | 95° | 90° | 85°`) — lower limit = earlier boost cutback = cooler, quieter CPU. Persisted and re-applied (with verification) on startup.
+- **🎮 GPU Power Override**:
+  - `Auto | None | TGP | +Boost` pills (hover for explanation). `Auto` follows the Power Mode table; explicit values override it until cleared. Persisted and re-applied on startup.
 - **🔋 Battery Care**:
   - 80% maximum charge limiter via HP WMI BIOS to preserve lithium-ion battery health.
+- **🔌 Auto Power Switch**:
+  - On battery: saves the current mode/profile and applies Eco + Quiet. On AC: restores what was saved.
+- **📡 Wake-on-LAN Toggle**:
+  - Reads the *real* NIC magic-packet state (`MSFT_NetAdapterPowerManagementSettingData`) and toggles it on all adapters.
+- **🎮 Game Auto-Profile**:
+  - Detects fullscreen foreground + GPU load > 40% sustained 5 s → switches to Performance + Cool fans; restores the previous state 10 s after the game exits.
+- **🖥️ Hardware HUD Overlay**:
+  - Sleek, semi-transparent obsidian HUD with CPU/GPU temps + loads and RAM usage (thin solid bars).
+  - Magnetic screen border snapping, click-through capability, and topmost re-assertion while fullscreen apps are in the foreground.
+- **🧩 Collapsible System Options**:
+  - The System Options card collapses to a slim title strip (click the ▾/▴ chevron) to keep the window compact; starts compact each launch.
 - **🌐 Embedded Web Dashboard & REST API**:
   - Built-in lightweight HTTP server with token authentication. Monitor hardware and switch power modes from a phone or web browser on your LAN.
 - **🧹 Memory Working Set Flush**:
@@ -64,13 +88,13 @@ Run the automated build script from the project root:
 ```cmd
 build.bat
 ```
-The compiled executable is placed in `output\OmenControl.exe`.
+The compiled executable is placed in `output\AMDOMEN.exe`.
 
 ---
 
 ### Running & Usage
 
-> **Note**: `OmenControl.exe` requires **Administrator Privileges** to communicate with the PawnIO kernel driver and HP WMI BIOS interface.
+> **Note**: `AMDOMEN.exe` requires **Administrator Privileges** to communicate with the PawnIO kernel driver and HP WMI BIOS interface.
 
 - **Main Window**: 306x735 fixed-size obsidian dashboard with custom Fluent-style toggle switches and steppers.
 - **System Tray**: Minimizing or closing the window places the application in the system tray. Right-click the tray icon to restore or cleanly exit.
@@ -87,9 +111,14 @@ The application automatically loads and persists settings to `output\config.json
   "power_mode": 1,
   "fan_mode": 0,
   "fan_profile": 0,
+  "log_enabled": false,
+  "tctl_limit": 90,
   "amd_curve_optimizer": -15,
   "battery_limit": 80,
   "minimize_on_close": true,
+  "gpu_power_level": -1,
+  "auto_power_switch": false,
+  "game_auto_profile": false,
   "hud": {
     "show": true,
     "passthrough": true,
@@ -108,13 +137,30 @@ The application automatically loads and persists settings to `output\config.json
 }
 ```
 
+**Key reference** (all root-level unless noted):
+
+| Key | Values | Meaning |
+|---|---|---|
+| `power_mode` | 0–3 | Eco / Balanced / Performance / Turbo (re-applied with MP1 verification on start) |
+| `fan_mode` | 0 / 2 | BIOS Auto / App control |
+| `fan_profile` | 0–2 | Default / Quiet / Cool |
+| `log_enabled` | bool | Root-level logger toggle (writes `amdomen.log` next to EXE; disabled by default) |
+| `tctl_limit` | 0 / 75–105 | CPU temp limit (°C); 0 = Auto (firmware default) |
+| `amd_curve_optimizer` | -30–30 | All-core Curve Optimizer counts |
+| `battery_limit` | 80 / 100 | 80% charge limiter |
+| `gpu_power_level` | -1–2 | GPU TGP override: -1 Auto / 0 None / 1 TGP / 2 +Boost |
+| `auto_power_switch` | bool | Eco+Quiet on battery, restore on AC |
+| `game_auto_profile` | bool | Perf+Cool while a fullscreen game is detected |
+| `hud.*` | — | HUD visibility, position/size, opacity, click-through |
+| `api.*` | — | REST server: enabled, port, bind_all (0.0.0.0), auth token |
+
 ---
 
 # Technical Architecture & AI Knowledge Base
 
 ```
                                  +-----------------------------------+
-                                 |         OmenControl.exe           |
+                                 |         AMDOMEN.exe               |
                                  |   (Native Win32 C++20 Binary)     |
                                  +-----------------+-----------------+
                                                    |
@@ -124,16 +170,16 @@ The application automatically loads and persists settings to `output\config.json
 |    User Interfaces   |               |     HAL & Services    |               |  Embedded HTTP Server |
 | - MainWindowWin32    |               | - OmenHal (Singleton) |               | - ApiServer (httplib) |
 | - HudWindow (GDI)    |               | - PowerControl        |               | - Token Authorization |
-| - TrayManager        |               | - FanService (PID)    |               | - Web Dashboard HTML  |
+| - TrayManager        |               | - FanService (Engine) |               | - Web Dashboard HTML  |
 +----------------------+               +-----------+-----------+               +-----------------------+
                                                    |
         +------------------------------------------+------------------------------------------+
         |                                          |                                          |
 +-------v---------------+                  +-------v---------------+                  +-------v---------------+
-|  PawnIO Kernel Driver |                  |   HP WMI BIOS (WQL)   |                  | Windows Power Scheme  |
+|  PawnIO Kernel Driver |                  |   HP WMI BIOS (WQL)   |                  | Windows Power & Tasks |
 | - EC Port I/O (62/66) |                  | - hpqBIntM (0x20008)  |                  | - Power Overlay API   |
-| - SMN / SMU Mailboxes |                  | - Method 0x1A (Mode)  |                  | - GUID_PERFBOOST      |
-| - RAPL MSR Energy     |                  | - Method 0x29 (PL1/2) |                  | - GUID_PERFEPP        |
+| - SMN / SMU Mailboxes |                  | - Method 0x1A (Mode)  |                  | - GUID_PERFBOOST/EPP  |
+| - RAPL MSR Energy     |                  | - Method 0x29 (PL1/2) |                  | - ITaskService COM    |
 | - SMBus DIMM Temp     |                  | - Method 0x22 (GPU)   |                  +-----------------------+
 +-----------------------+                  +-----------------------+
 ```
@@ -201,6 +247,16 @@ Integrates with the Windows power scheme overlay engine (`powrprof.dll`):
 
 ---
 
+### 5. Native Task Scheduler 2.0 COM Subsystem
+Replaces legacy command-line process spawning (`schtasks.exe` / `powershell.exe`) with direct in-process COM API calls (`taskschd.h` / `taskschd.lib`):
+- **`ITaskService`**: In-process connection to the Windows Task Scheduler service.
+- **`IPrincipal`**: Configures `TASK_RUNLEVEL_HIGHEST` for silent elevation at user logon.
+- **`ILogonTrigger`**: Triggers execution at user logon.
+- **`ITaskSettings`**: Configures crash auto-restart interval (1 min), infinite execution limit, and unconstrained battery execution.
+- **Performance**: Query execution < 1 ms, registration < 5 ms, 0 subprocesses, zero disk artifacts.
+
+---
+
 ## Source Code Directory Structure
 
 ```
@@ -208,21 +264,21 @@ OmenReplace/
 ├── build.bat                    # Automated MSVC + Ninja build script
 ├── CMakeLists.txt               # CMake build definition (GLOB-based C++20)
 ├── output/
-│   ├── OmenControl.exe          # Compiled standalone binary
+│   ├── AMDOMEN.exe              # Compiled standalone binary
 │   └── config.json              # Active user & hardware configuration
 ├── src/
-│   ├── main.cpp                 # WinMain entry, mutex check, lifecycle
+│   ├── main.cpp                 # WinMain entry, single-instance mutex, lifecycle
 │   ├── gui/
 │   │   ├── MainWindowWin32.h/.cpp # Native Win32 obsidian main window UI
 │   │   ├── HudWindow.h/.cpp       # Semi-transparent GDI HUD overlay
-│   │   └── TrayManager.h/.cpp     # System tray icon & context menu
+│   │   └── TrayManager.h/.cpp     # System tray icon, TaskbarCreated listener, context menu
 │   └── hal/
 │       ├── OmenHal.h/.cpp         # Central hardware polling thread & cache
 │       ├── OmenEc.h/.cpp          # Direct port I/O, SMU mailboxes, SMBus
 │       ├── PawnIO.h/.cpp          # Low-level PawnIO driver interface
 │       ├── PowerControl.h/.cpp    # HP WMI, AMD SMU PPT, Windows power plans
-│       ├── FanService.h/.cpp      # PID controller, profile curves, config JSON
-│       ├── FanController.h/.cpp   # PID math and fan step calculations
+│       ├── FanService.h/.cpp      # Hybrid FanCurveEngine, profile curves, config JSON
+│       ├── FanController.h/.cpp   # Serialized EC registers & WMI fan level hardware I/O
 │       ├── WmiHelper.h/.cpp       # COM/WMI helper for HP BIOS methods
 │       ├── ThermalService.h/.cpp  # Thermal sensor aggregation
 │       ├── MemoryService.h/.cpp   # Working set & memory usage queries
@@ -244,34 +300,46 @@ OmenReplace/
 | `OmenHal` | `src/hal/OmenHal.h` | Singleton hardware polling loop (1s interval). Caches CPU/GPU temperatures, fan RPMs, load percentages, and RAM statistics. Mutex-protected thread-safe accessors. |
 | `OmenEc` | `src/hal/OmenEc.h` | Direct EC port `0x62`/`0x66` read/writes, watchdog heartbeat management, RSMU/MP1 SMU command execution via SMN. |
 | `PowerControl` | `src/hal/PowerControl.h` | Power mode orchestration: coordinates WMI `0x1A`, WMI `0x29`, WMI `0x22`, AMD SMU PPT limits, and Windows overlays without race conditions. |
-| `FanService` | `src/hal/FanService.h` | Manages fan modes (Auto, Quiet, Balanced, Aggressive, Max), persists `config.json`, controls HUD visibility and battery limits. |
-| `MainWindowWin32` | `src/gui/MainWindowWin32.h` | Native Win32 UI (306x735). Custom GDI double-buffered rendering of cards, pill buttons, toggle switches, stepper buttons, and hover cursors. |
+| `FanService` | `src/hal/FanService.h` | Manages fan modes (BIOS Auto, Default, Quiet, Cool) via `FanCurveEngine`, persists `config.json`, controls HUD visibility and battery limits. |
+| `FanController` | `src/hal/FanController.h` | Single owner of hardware fan writes (EC registers + WMI fan level), serialized by mutex. |
+| `MainWindowWin32` | `src/gui/MainWindowWin32.h` | Native Win32 UI (306x735). Custom GDI double-buffered rendering of cards, pill buttons, toggle switches, steppers, and native COM autostart management. |
 | `HudWindow` | `src/gui/HudWindow.h` | Topmost layered window overlay. Double-buffered GDI rendering of CPU, GPU, and RAM telemetry with real-time border snapping in `WM_MOVING`. |
+| `TrayManager` | `src/gui/TrayManager.h` | System tray icon manager with `TaskbarCreated` listener and instant window restore. |
 | `ApiServer` | `src/hal/ApiServer.h` | Runs embedded HTTP REST server on configured port (default `8080`). Authenticates via Bearer token / `X-Api-Token`. Serves web dashboard and REST API. |
 
 ---
 
 ## Embedded Web API & Mobile Dashboard
 
-The embedded HTTP server starts automatically with `OmenControl.exe` (if enabled in `config.json`).
+The embedded HTTP server starts automatically with `AMDOMEN.exe` (if enabled in `config.json`).
 
 ### Web Dashboard
 Navigate to `http://localhost:8080/` (or your LAN IP) in any desktop or mobile browser. It presents a dark-themed, mobile-friendly interface for monitoring thermals and controlling power/fan modes.
 
 ### REST API Endpoints
-All API requests require authentication via `Authorization: Bearer <token>` or header `X-Api-Token: <token>`.
+All API requests require authentication via `Authorization: Bearer <token>`, header `X-API-Token: <token>`, or `?token=<token>` query parameter.
 
-| Endpoint | Method | Description | Example Payload |
-|---|---|---|---|
-| `/api/status` | `GET` | Returns full system telemetry and current modes | `{"status":"ok","telemetry":{"cpu":{"temp":52.3,"load":12.0},...}}` |
-| `/api/power-mode` | `POST` | Sets active power mode (`0`=Eco, `1`=Balanced, `2`=Perf, `3`=Turbo) | `{"mode": 1}` |
-| `/api/fan-mode` | `POST` | Sets fan mode (`0`=Auto/PID, `1`=Manual) | `{"mode": 0}` |
-| `/api/fan-profile`| `POST` | Sets fan curve profile (`0`=Quiet, `1`=Balanced, `2`=Aggressive, `3`=Max) | `{"profile": 1}` |
-| `/api/fan-level` | `POST` | Sets manual fan speed percentages | `{"cpu_fan": 60, "gpu_fan": 60}` |
-| `/api/curve-optimizer` | `POST` | Sets AMD Curve Optimizer counts (-30 to +30) | `{"value": -15}` |
-| `/api/battery-limit` | `POST` | Sets battery charge threshold (`80` or `100`) | `{"limit": 80}` |
-| `/api/hud` | `POST` | Toggles HUD overlay visibility and click-through | `{"show": true, "passthrough": true}` |
-| `/api/flush-memory` | `POST` | Purges working set memory cache | `{}` |
+| Endpoint | Method | Description |
+|---|---|---|
+| `/` | `GET` | Embedded web dashboard (token prompt in-browser) |
+| `/api/telemetry` | `GET` | Full telemetry + current state as JSON. Add `?plain=1` for compact `key=value` text (ESP32-friendly) |
+| `/api/state` | `GET` | Current modes only (power/fan/mux/battery/CO/GPU power/WoL) |
+| `/api/control` | `POST` | Executes an action: `{"action": "<name>", "value": <int>}` |
+
+**`/api/control` actions:**
+
+| Action | Value | Description |
+|---|---|---|
+| `set_power_mode` | 0–2 | Eco / Balanced / Performance |
+| `set_fan_mode` | 0 / 1 | BIOS Auto / App control |
+| `set_fan_profile` | 0–2 | Default / Quiet / Cool (switches to App control) |
+| `set_amd_co` | -30–0 | Curve Optimizer counts |
+| `set_gpu_power` | -1–2 | TGP override: -1 Auto / 0 None / 1 TGP / 2 +Boost |
+| `set_tctl_limit` | 0 / 75–105 | CPU temp limit; 0 = Auto |
+| `set_wol` | 0 / 1 | Wake-on-LAN on all adapters |
+| `set_battery_limit` | 80 / 100 | Battery charge threshold |
+| `set_gpu_mode` | 0 / 1 | GPU MUX: Hybrid / Discrete (reboot required) |
+| `flush_ram` | — | Purge working set memory cache |
 
 ---
 
@@ -282,6 +350,7 @@ All API requests require authentication via `Authorization: Bearer <token>` or h
 - **Linked Libraries**:
   - `user32.lib`, `gdi32.lib`, `shell32.lib`, `advapi32.lib` (Win32 OS APIs)
   - `ole32.lib`, `oleaut32.lib`, `wbemuuid.lib` (WMI / COM)
+  - `taskschd.lib` (Windows Task Scheduler 2.0 COM API)
   - `powrprof.lib` (Windows Power Scheme & Overlay APIs)
   - `dwmapi.lib`, `msimg32.lib` (Desktop Window Manager & Alpha blending)
   - `ws2_32.lib` (Winsock for `httplib`)
@@ -292,7 +361,7 @@ All API requests require authentication via `Authorization: Bearer <token>` or h
 
 ### Adding a New Hardware Telemetry Metric
 1. In `src/hal/OmenHal.h` / `OmenHal.cpp`, add the polling logic and thread-safe getter inside the `PollingLoop` thread.
-2. In `src/hal/ApiServer.cpp`, include the metric inside the JSON response of `/api/status`.
+2. In `src/hal/ApiServer.cpp`, include the metric inside the JSON response of `/api/telemetry`.
 3. In `src/gui/HudWindow.cpp`, render the metric inside `OnPaint` (using the scaling factor `s = std::min(sx, sy)`).
 
 ### Adding a New HP WMI BIOS Command

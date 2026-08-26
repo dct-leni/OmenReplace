@@ -40,6 +40,18 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showMode) {
     return 1;
   }
 
+  // Single-instance guard: if already running, restore existing window and exit.
+  HANDLE hSingleInstance = CreateMutexW(nullptr, TRUE, L"Local\\AMDOMEN_SingleInstanceMutex");
+  if (GetLastError() == ERROR_ALREADY_EXISTS) {
+    HWND main = FindWindowW(L"AMDOMEN_MAIN_WIN32", nullptr);
+    if (main) {
+      ShowWindow(main, SW_RESTORE);
+      SetForegroundWindow(main);
+    }
+    if (hSingleInstance) CloseHandle(hSingleInstance);
+    return 0;
+  }
+
   // STA required: Slint/winit renderer fast-fails when the UI thread is MTA.
   HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   if (SUCCEEDED(com))

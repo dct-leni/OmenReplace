@@ -211,6 +211,12 @@ LRESULT CALLBACK HudWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (self) self->Destroy();
     else DestroyWindow(hwnd);
     return 0;
+  case WM_APP + 50:
+    // Fullscreen app is in the foreground — reassert topmost (some games
+    // demote us). Cheap, no-ops when already topmost.
+    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    return 0;
   case WM_DESTROY:
     if (self) {
       if (self->m_timerId) KillTimer(hwnd, self->m_timerId);

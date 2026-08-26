@@ -53,6 +53,9 @@ void FanService::SaveConfig() {
   j["battery_limit"] = m_overlayConfig.batteryLimit;
   j["minimize_on_close"] = m_overlayConfig.minimizeOnClose;
   j["log_enabled"] = m_overlayConfig.logEnabled;
+  j["gpu_power_level"] = m_overlayConfig.gpuPowerLevel;
+  j["auto_power_switch"] = m_overlayConfig.autoPowerSwitch;
+  j["game_auto_profile"] = m_overlayConfig.gameAutoProfile;
 
   nlohmann::json &hud = j["hud"];
   hud["show"] = m_overlayConfig.show;
@@ -62,7 +65,6 @@ void FanService::SaveConfig() {
   hud["pos_y"] = (int)std::round(m_overlayConfig.posY);
   hud["size_w"] = (int)std::round(m_overlayConfig.sizeW);
   hud["size_h"] = (int)std::round(m_overlayConfig.sizeH);
-  hud["log_enabled"] = m_overlayConfig.logEnabled;
   hud["tctl_limit"] = m_overlayConfig.tctlLimit;
 
   nlohmann::json &api = j["api"];
@@ -112,19 +114,26 @@ void FanService::LoadConfig() {
     if (j.contains("log_enabled"))
       m_overlayConfig.logEnabled = j["log_enabled"].get<bool>();
 
+    if (j.contains("gpu_power_level"))
+      m_overlayConfig.gpuPowerLevel = j["gpu_power_level"].get<int>();
+    if (j.contains("auto_power_switch"))
+      m_overlayConfig.autoPowerSwitch = j["auto_power_switch"].get<bool>();
+    if (j.contains("game_auto_profile"))
+      m_overlayConfig.gameAutoProfile = j["game_auto_profile"].get<bool>();
+
+    PowerControl::Get().SetGpuPowerOverride(m_overlayConfig.gpuPowerLevel);
+    PowerControl::Get().SetAcEnabled(m_overlayConfig.autoPowerSwitch);
+
     if (j.contains("amd_curve_optimizer")) {
       int val = j["amd_curve_optimizer"].get<int>();
       if (val >= -30 && val <= 30)
         PowerControl::Get().SetCachedAmdCurveOptimizer(val);
     }
 
-    // Modern "hud" section with fallback to legacy "overlay"
-    const char *hudKey = j.contains("hud") ? "hud" : (j.contains("overlay") ? "overlay" : nullptr);
-    if (hudKey) {
-      auto &h = j[hudKey];
+    if (j.contains("hud")) {
+      auto &h = j["hud"];
       if (h.contains("show")) m_overlayConfig.show = h["show"].get<bool>();
       if (h.contains("passthrough")) m_overlayConfig.hudPassthrough = h["passthrough"].get<bool>();
-      else if (h.contains("hud_passthrough")) m_overlayConfig.hudPassthrough = h["hud_passthrough"].get<bool>();
       if (h.contains("opacity")) m_overlayConfig.opacity = h["opacity"].get<float>();
       if (h.contains("pos_x")) m_overlayConfig.posX = h["pos_x"].get<float>();
       if (h.contains("pos_y")) m_overlayConfig.posY = h["pos_y"].get<float>();
@@ -135,17 +144,6 @@ void FanService::LoadConfig() {
         if (v != 0 && (v < 75 || v > 105))
           v = 0;
         m_overlayConfig.tctlLimit = v;
-      }
-
-      // Legacy fallbacks if nested inside overlay
-      if (!j.contains("battery_limit") && h.contains("battery_limit"))
-        m_overlayConfig.batteryLimit = h["battery_limit"].get<int>();
-      if (!j.contains("minimize_on_close") && h.contains("minimize_on_close"))
-        m_overlayConfig.minimizeOnClose = h["minimize_on_close"].get<bool>();
-      if (!j.contains("amd_curve_optimizer") && h.contains("amd_curve_optimizer")) {
-        int val = h["amd_curve_optimizer"].get<int>();
-        if (val >= -30 && val <= 30)
-          PowerControl::Get().SetCachedAmdCurveOptimizer(val);
       }
     }
 
@@ -285,43 +283,32 @@ void FanService::Update() {
                    std::chrono::steady_clock::now().time_since_epoch())
                    .count();
 
-    // Recalculate targets every 2 seconds for smooth but responsive ramping
-    if (now - m_lastTargetUpdate >= 2000 || m_lastTargetUpdate == 0) {
+    // Recalculate targets every second — EC writes are cheap and the WMI
+    // level write only fires on change, so a fast cadence costs nothing and
+    // reacts to spikes within one tick.
+    if (now - m_lastTargetUpdate >= 1000 || m_lastTargetUpdate == 0) {
       if (mode == FanControlMode::AppMode) {
-        float maxTemp = std::max(m_avgCpu, m_avgGpu);
-        // Thermal safety: force 100% fans above 90°C regardless of profile
-        // and ramp limits.
-        if (maxTemp > 90.0f) {
+        float avgMax = (std::max)(m_avgCpu, m_avgGpu);
+        float curMax = (std::max)(curCpu, curGpu);
+
+        // Thermal safety threshold derives from the user's CPU temp limit
+        // (Tctl), not a hardcoded value. Auto (0) falls back to 95 °C.
+        float tctlLimit = (float)FanService::Get().GetOverlayConfig().tctlLimit;
+        float emergencyTemp = (tctlLimit > 0.0f) ? tctlLimit - 2.0f : 93.0f;
+        if (m_emergencyLatch) {
+          if (avgMax < emergencyTemp - 4.0f && curMax < emergencyTemp - 3.0f)
+            m_emergencyLatch = false;
+        } else if (avgMax >= emergencyTemp || curMax >= emergencyTemp + 1.0f) {
+          m_emergencyLatch = true;
+        }
+
+        if (m_emergencyLatch) {
           m_fan1Target = 100;
           m_fan2Target = 100;
-          m_heldPidTarget = -1;
         } else {
-          // Deadband: hold the last PID output while the temp sits inside
-          // [setpoint-3, setpoint+2] so fans don't hunt around the setpoint.
-          bool outsideBand =
-              m_heldPidTarget < 0 || maxTemp > m_pid.setpoint + 2.0f ||
-              maxTemp < m_pid.setpoint - 3.0f;
-          if (outsideBand)
-            m_heldPidTarget = m_pid.Compute(maxTemp, now);
-
-          // Ramp limiter: cap per-tick change for softer acoustics. The CPU
-          // and GPU share heatpipes on this chassis, so both fans spin at the
-          // same target. Performance/Turbo attacks faster; emergencies (>90°C)
-          // bypass via the branch above.
-          PowerMode pm = PowerControl::Get().GetCurrentMode();
-          int maxStep = (pm == PowerMode::Performance || pm == PowerMode::Turbo)
-                            ? 30
-                            : 12;
-          int prev = m_fan1Target;
-          int target = m_heldPidTarget;
-          if (prev > 0 && prev <= 100) {
-            if (target > prev + maxStep)
-              target = prev + maxStep;
-            else if (target < prev - maxStep)
-              target = prev - maxStep;
-          }
-          m_fan1Target = std::clamp(target, m_pid.minSpeed, m_pid.maxSpeed);
-          m_fan2Target = m_fan1Target;
+          int target = m_curveEngine.Compute(curMax, avgMax, now);
+          m_fan1Target = target;
+          m_fan2Target = target;
         }
         LogFanEvent("[AMDOMEN] fan_targets cpu=%d gpu=%d\n", m_fan1Target,
                     m_fan2Target);
@@ -353,9 +340,13 @@ void FanService::Update() {
       lastEcPing = nowHb;
     }
 
-    // Apply/re-apply fan targets
-    bool targetChanged = (m_fan1Target != m_lastAppliedFan1) ||
-                         (m_fan2Target != m_lastAppliedFan2);
+    // Delta suppression: only write to hardware if target changed by >= 2% or boundary reached
+    bool targetChanged = (std::abs(m_fan1Target - m_lastAppliedFan1) >= 2) ||
+                         (std::abs(m_fan2Target - m_lastAppliedFan2) >= 2);
+    if ((m_fan1Target == 100 && m_lastAppliedFan1 != 100) ||
+        (m_fan1Target == 0 && m_lastAppliedFan1 != 0)) {
+      targetChanged = true;
+    }
 
     m_persistenceCounter++;
     if (m_persistenceCounter >= 2) {
@@ -410,8 +401,7 @@ void FanService::SetFanAuto() {
 
 void FanService::SetProfile(FanControlProfile profile) {
   m_profile = profile;
-  m_pid.ApplyPreset(profile);
-  m_heldPidTarget = -1;
+  m_curveEngine.ApplyPreset(profile);
   LogFanEvent("[AMDOMEN] fan_profile=%d\n", (int)profile);
   SaveConfig();
 }

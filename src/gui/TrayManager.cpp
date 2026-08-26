@@ -73,6 +73,8 @@ void TrayManager::ThreadMain() {
   m_hwnd = nullptr;
 }
 
+static UINT s_uTaskbarRestart = 0;
+
 void TrayManager::SetupIcon(HWND hwnd) {
   ZeroMemory(&m_nid, sizeof(m_nid));
   m_nid.cbSize = sizeof(m_nid);
@@ -83,6 +85,8 @@ void TrayManager::SetupIcon(HWND hwnd) {
   m_nid.hIcon =
       LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(1));
   wcscpy_s(m_nid.szTip, L"AMDOMEN");
+  // Delete any existing icon first (in case of taskbar reload/reset)
+  Shell_NotifyIconW(NIM_DELETE, &m_nid);
   Shell_NotifyIconW(NIM_ADD, &m_nid);
 }
 
@@ -93,16 +97,26 @@ LRESULT CALLBACK TrayManager::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
     CREATESTRUCTW *cs = (CREATESTRUCTW *)lParam;
     self = (TrayManager *)cs->lpCreateParams;
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)self);
+    if (!s_uTaskbarRestart)
+      s_uTaskbarRestart = RegisterWindowMessageW(L"TaskbarCreated");
     return TRUE;
   }
+  if (s_uTaskbarRestart != 0 && msg == s_uTaskbarRestart) {
+    if (self) self->SetupIcon(hwnd);
+    return 0;
+  }
   if (msg == WM_TRAYICON) {
-    if (lParam == WM_RBUTTONUP) {
+    UINT evt = (UINT)LOWORD(lParam);
+    if (evt == WM_RBUTTONUP || evt == WM_CONTEXTMENU || lParam == WM_RBUTTONUP) {
       if (self) self->HandleMenu(hwnd);
-    } else if (lParam == WM_LBUTTONDBLCLK) {
+    } else if (evt == WM_LBUTTONDBLCLK || lParam == WM_LBUTTONDBLCLK) {
       if (self) {
-        // Restore the main window (show it).
+        // Restore the main window (show it and bring to front).
         HWND main = FindWindowW(L"AMDOMEN_MAIN_WIN32", nullptr);
-        if (main) ShowWindow(main, SW_SHOW);
+        if (main) {
+          ShowWindow(main, SW_RESTORE);
+          SetForegroundWindow(main);
+        }
       }
     }
     return 0;
@@ -164,7 +178,10 @@ void TrayManager::HandleMenu(HWND hwnd) {
   switch (cmd) {
   case IDM_TRAY_RESTORE: {
     HWND main = FindWindowW(L"AMDOMEN_MAIN_WIN32", nullptr);
-    if (main) ShowWindow(main, SW_SHOW);
+    if (main) {
+      ShowWindow(main, SW_RESTORE);
+      SetForegroundWindow(main);
+    }
     break;
   }
   case IDM_TRAY_FAN_AUTO:
