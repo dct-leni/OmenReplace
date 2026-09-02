@@ -59,13 +59,15 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showMode) {
                          RPC_C_AUTHN_LEVEL_DEFAULT, RPC_C_IMP_LEVEL_IMPERSONATE,
                          nullptr, EOAC_NONE, nullptr);
 
-  // Runtime DLLs (slint_cpp.dll) live in libs\ next to the EXE.
+  // Ensure application working directory is the folder containing the executable
+  // (crucial when started elevated via Task Scheduler at logon).
   {
     char path[MAX_PATH];
     if (GetModuleFileNameA(nullptr, path, MAX_PATH) > 0) {
       std::string dir(path);
       size_t sep = dir.find_last_of("\\/");
       if (sep != std::string::npos) dir = dir.substr(0, sep + 1);
+      SetCurrentDirectoryA(dir.c_str());
       SetDllDirectoryA((dir + "libs").c_str());
     }
   }

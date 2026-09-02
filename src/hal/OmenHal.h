@@ -8,7 +8,6 @@
 #include <thread>
 #include <vector>
 
-
 class OmenHal {
 public:
   static OmenHal &Get();
@@ -47,6 +46,16 @@ public:
   int GetBatteryChargeLimit();
   bool SetBatteryChargeLimit(int percentage);
 
+  // Display Panel Overdrive
+  bool GetDisplayOverdrive();
+  bool SetDisplayOverdrive(bool enable);
+
+  // Wake on LAN (Ethernet + BIOS S3/S4/S5) & Wake on WLAN/BT
+  bool GetWakeOnLan();
+  bool SetWakeOnLan(bool enable);
+  bool GetWakeOnWlanBt();
+  bool SetWakeOnWlanBt(bool enable);
+
   int GetAmdCurveOptimizer();
   bool SetAmdCurveOptimizer(int coCounts);
   int GetCachedAmdCurveOptimizer();
@@ -57,13 +66,12 @@ public:
   // Set CPU temperature (Tctl) limit via MP1 0x3F. 75..105°C.
   bool SetTctlTemp(int tempC);
 
-
   // Desktop
   bool GetIsDesktop();
   bool GetIsAnotherFanControllerActive();
 
   // Power/Performance
-  void SetPowerMode(int mode); // 0=Eco, 1=Balanced, 2=Performance
+  void SetPowerMode(int mode); // 0=Eco, 1=Balanced, 2=Performance, 3=Turbo
   int GetPowerMode();
   std::string GetGpuModeStr();
   int GetGpuModeInt();

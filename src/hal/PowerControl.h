@@ -42,9 +42,21 @@ public:
   bool GetPowerThermalLimits(int &powerW, int &tempC);
   bool SetTctlTemp(int tempC);
 
+  // Hardware State Discovery (First Read)
+  PowerMode ReadHardwarePowerMode();
+  int ReadHardwareGpuPower();
+  int ReadHardwareAmdCurveOptimizer();
+  int ReadHardwareTctlLimit();
+  int ReadHardwareBatteryLimit();
+
   // Battery Care
   int GetBatteryChargeLimit();
   bool SetBatteryChargeLimit(int limitPercent);
+
+  // Display Panel Overdrive (LCD Response Time Optimization)
+  bool GetDisplayOverdrive();
+  bool SetDisplayOverdrive(bool enable);
+  bool ReadHardwareDisplayOverdrive();
 
   // GPU MUX startup probe (WMI 0x52; only changes on reboot, no need to poll)
   void InitGpuMux();
@@ -52,15 +64,30 @@ public:
   // GPU power (TGP) override: -1 = Auto (mode table), 0..2 = Min/Med/Max.
   int GetGpuPowerOverride() { return m_gpuPowerOverride; }
   void SetGpuPowerOverride(int level) { m_gpuPowerOverride = level; }
+  int GetEffectiveGpuPowerLevel() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_gpuPowerOverride >= 0 && m_gpuPowerOverride <= 2)
+      return m_gpuPowerOverride;
+    switch (m_currentMode) {
+    case PowerMode::Eco: return 0;
+    case PowerMode::Balanced: return 1;
+    case PowerMode::Performance:
+    case PowerMode::Turbo:
+    default: return 2;
+    }
+  }
   void SetAcEnabled(bool v) {
     m_acEnabled = v;
     m_acLastLine = -1; // re-baseline on toggle
   }
 
-  // Wake-on-LAN (NIC magic packet) — real state from
-  // MSFT_NetAdapterPowerManagementSettingData (root\standardcimv2).
+  // Wake-on-LAN (Wired NIC Magic Packet + HP BIOS S3/S4/S5 Wake-on-LAN)
   bool GetWakeOnLan();
   bool SetWakeOnLan(bool enable);
+
+  // Wake-on-WLAN & Bluetooth (Wireless M.2 Magic Packet + HP BIOS Wake on WLAN/BT)
+  bool GetWakeOnWlanBt();
+  bool SetWakeOnWlanBt(bool enable);
 
   // AC-line auto-switch: on battery → Eco+Quiet (saving current state),
   // on AC → restore. Call periodically from the worker loop.
@@ -82,14 +109,17 @@ public:
   bool SetFanLevelWmiBg(
       int cpuPercent,
       int gpuPercent); // Background thread version (uses persistent WMI)
+  bool SetFanMax(bool enabled); // WMI Method 0x27 (Max Fan Trigger)
 
 private:
   PowerControl();
 
   std::mutex m_mutex;
   PowerMode m_currentMode = PowerMode::Balanced;
+  bool m_maxFanActive = false;
   int m_gpuMode = -1; // 0=Hybrid, 1=Discrete, 2=Optimus
   int m_batteryLimitPercent = 100; // Cached battery threshold (WMI only knows on/off)
+  bool m_displayOverdrive = true;  // Cached display overdrive
   int m_amdCurveOptimizer = 0;
   int m_gpuPowerOverride = -1; // -1=Auto, 0..2=Min/Med/Max TGP override
 
@@ -100,8 +130,9 @@ private:
   PowerMode m_acSavedMode = PowerMode::Balanced;
   int m_acSavedProfile = 0;
 
-  // Wake-on-LAN cached state (refreshed at startup + after toggle)
+  // Wake cached state (refreshed at startup + after toggle)
   int m_wolCached = -1; // -1 unknown, 0 off, 1 on
+  int m_wlanBtWolCached = -1; // -1 unknown, 0 off, 1 on
 
   // WMI HP BIOS Helper
   bool CallHpBios(uint32_t cmd, uint32_t type, uint8_t *data, size_t size,

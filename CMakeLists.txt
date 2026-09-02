@@ -24,7 +24,7 @@ target_include_directories(AMDOMEN PRIVATE
     "${CMAKE_SOURCE_DIR}/vendor"
 )
 
-# --- Windows libraries (EC/WMI/COM) ---
+# --- Windows libraries (EC/WMI/COM/GDI+) ---
 target_link_libraries(AMDOMEN PRIVATE
-    wbemuuid ole32 oleaut32 powrprof pdh psapi winmm comctl32 user32 advapi32 shell32 ws2_32 taskschd
+    wbemuuid ole32 oleaut32 powrprof pdh psapi winmm comctl32 user32 gdi32 gdiplus advapi32 shell32 ws2_32 taskschd
 )

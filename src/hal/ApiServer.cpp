@@ -335,7 +335,7 @@ void ApiServer::ServerThreadFunc() {
 
       if (action == "set_power_mode") {
         cmd.action = ApiAction::SetPowerMode;
-        cmd.intValue = std::clamp(j.value("value", 1), 0, 2);
+        cmd.intValue = std::clamp(j.value("value", 1), 0, 3);
       } else if (action == "set_fan_mode") {
         cmd.action = ApiAction::SetFanMode;
         cmd.intValue = j.value("value", 0);

@@ -46,16 +46,23 @@ FanService::FanService() {
 
 void FanService::SaveConfig() {
   nlohmann::json j;
-  j["power_mode"] = (int)PowerControl::Get().GetCurrentMode();
+  int saveMode = (int)PowerControl::Get().GetCurrentMode();
+  if (saveMode == (int)PowerMode::Turbo) {
+    saveMode = (int)PowerMode::Performance; // Turbo is a temporary active session mode
+  }
+  j["power_mode"] = saveMode;
   j["fan_mode"] = (int)m_controlMode.load();
   j["fan_profile"] = (int)m_profile.load();
-  j["amd_curve_optimizer"] = PowerControl::Get().GetCachedAmdCurveOptimizer();
+  j["amd_curve_optimizer"] = m_overlayConfig.amdCurveOptimizer;
   j["battery_limit"] = m_overlayConfig.batteryLimit;
+  j["display_overdrive"] = m_overlayConfig.displayOverdrive;
   j["minimize_on_close"] = m_overlayConfig.minimizeOnClose;
   j["log_enabled"] = m_overlayConfig.logEnabled;
   j["gpu_power_level"] = m_overlayConfig.gpuPowerLevel;
   j["auto_power_switch"] = m_overlayConfig.autoPowerSwitch;
   j["game_auto_profile"] = m_overlayConfig.gameAutoProfile;
+  j["wake_on_lan"] = m_overlayConfig.wakeOnLan;
+  j["wake_on_wlan_bt"] = m_overlayConfig.wakeOnWlanBt;
 
   nlohmann::json &hud = j["hud"];
   hud["show"] = m_overlayConfig.show;
@@ -97,16 +104,26 @@ void FanService::LoadConfig() {
 
     if (j.contains("fan_profile")) {
       int prof = j["fan_profile"].get<int>();
-      if (prof >= 0 && prof <= 2)
+      if (prof >= 0 && prof <= 2) {
         m_profile = static_cast<FanControlProfile>(prof);
+        m_curveEngine.ApplyPreset(m_profile);
+      }
     }
 
-    if (j.contains("power_mode"))
-      PowerControl::Get().SetMode(
-          static_cast<PowerMode>(j["power_mode"].get<int>()));
+    int powerModeInt = 1;
+    if (j.contains("power_mode")) {
+      powerModeInt = j["power_mode"].get<int>();
+      if (powerModeInt >= 0 && powerModeInt <= 2)
+        m_overlayConfig.powerMode = powerModeInt;
+      else if (powerModeInt == (int)PowerMode::Turbo)
+        m_overlayConfig.powerMode = (int)PowerMode::Performance;
+    }
 
     if (j.contains("battery_limit"))
       m_overlayConfig.batteryLimit = j["battery_limit"].get<int>();
+
+    if (j.contains("display_overdrive"))
+      m_overlayConfig.displayOverdrive = j["display_overdrive"].get<bool>();
 
     if (j.contains("minimize_on_close"))
       m_overlayConfig.minimizeOnClose = j["minimize_on_close"].get<bool>();
@@ -114,20 +131,34 @@ void FanService::LoadConfig() {
     if (j.contains("log_enabled"))
       m_overlayConfig.logEnabled = j["log_enabled"].get<bool>();
 
-    if (j.contains("gpu_power_level"))
+    if (j.contains("gpu_power_level")) {
       m_overlayConfig.gpuPowerLevel = j["gpu_power_level"].get<int>();
+    }
+    if (m_overlayConfig.gpuPowerLevel < 0 || m_overlayConfig.gpuPowerLevel > 2) {
+      if (m_overlayConfig.powerMode == (int)PowerMode::Eco) m_overlayConfig.gpuPowerLevel = 0;
+      else if (m_overlayConfig.powerMode == (int)PowerMode::Balanced) m_overlayConfig.gpuPowerLevel = 1;
+      else m_overlayConfig.gpuPowerLevel = 2;
+    }
+    PowerControl::Get().SetGpuPowerOverride(m_overlayConfig.gpuPowerLevel);
+
     if (j.contains("auto_power_switch"))
       m_overlayConfig.autoPowerSwitch = j["auto_power_switch"].get<bool>();
     if (j.contains("game_auto_profile"))
       m_overlayConfig.gameAutoProfile = j["game_auto_profile"].get<bool>();
+    if (j.contains("wake_on_lan"))
+      m_overlayConfig.wakeOnLan = j["wake_on_lan"].get<bool>();
+    if (j.contains("wake_on_wlan_bt"))
+      m_overlayConfig.wakeOnWlanBt = j["wake_on_wlan_bt"].get<bool>();
 
-    PowerControl::Get().SetGpuPowerOverride(m_overlayConfig.gpuPowerLevel);
     PowerControl::Get().SetAcEnabled(m_overlayConfig.autoPowerSwitch);
 
     if (j.contains("amd_curve_optimizer")) {
       int val = j["amd_curve_optimizer"].get<int>();
-      if (val >= -30 && val <= 30)
-        PowerControl::Get().SetCachedAmdCurveOptimizer(val);
+      // Support undervolt counts (-30..0), clamp cleanly
+      if (val > 0) val = 0;
+      if (val < -30) val = -30;
+      m_overlayConfig.amdCurveOptimizer = val;
+      PowerControl::Get().SetCachedAmdCurveOptimizer(val);
     }
 
     if (j.contains("hud")) {
@@ -199,10 +230,7 @@ static float ReadStableRpm(bool secondFan) {
 }
 
 static float RejectRpmJump(float sample, float previous) {
-  if (sample < 0.0f)
-    return previous;
-  if (previous >= 0.0f && previous > 0.0f && sample > 0.0f &&
-      std::abs(sample - previous) > 1000.0f)
+  if (sample < 0.0f || sample > 8000.0f)
     return previous;
   return sample;
 }
@@ -256,21 +284,12 @@ void FanService::Update() {
     lastLoggedMode = mode;
     modeWasLogged = true;
   }
-  if (mode != FanControlMode::Auto && !OmenHal::Get().IsFanControlReady()) {
-    // Never assert manual EC/WMI control until worker COM and WMI are ready.
-    m_controlMode = FanControlMode::Auto;
-    mode = FanControlMode::Auto;
-    LogFanEvent("[AMDOMEN] fan_control readiness_failed mode=%d\n", (int)mode);
-    FanController::Get().RestoreBios();
-    m_lastAppliedFan1 = -1;
-    m_lastAppliedFan2 = -1;
-  }
-  static bool firstRun = true;
-  if (firstRun) {
-    firstRun = false;
-  }
-
   if (mode != FanControlMode::Auto) {
+    if (!OmenHal::Get().IsFanControlReady()) {
+      // Wait for background COM / WMI worker loop without resetting user mode preference
+      return;
+    }
+
     // Collect temperatures
     float curCpu = ThermalService::Get().GetCpuTemp();
     float curGpu = ThermalService::Get().GetGpuTemp();
@@ -283,16 +302,13 @@ void FanService::Update() {
                    std::chrono::steady_clock::now().time_since_epoch())
                    .count();
 
-    // Recalculate targets every second — EC writes are cheap and the WMI
-    // level write only fires on change, so a fast cadence costs nothing and
-    // reacts to spikes within one tick.
+    // Recalculate targets every second
     if (now - m_lastTargetUpdate >= 1000 || m_lastTargetUpdate == 0) {
       if (mode == FanControlMode::AppMode) {
         float avgMax = (std::max)(m_avgCpu, m_avgGpu);
         float curMax = (std::max)(curCpu, curGpu);
 
         // Thermal safety threshold derives from the user's CPU temp limit
-        // (Tctl), not a hardcoded value. Auto (0) falls back to 95 °C.
         float tctlLimit = (float)FanService::Get().GetOverlayConfig().tctlLimit;
         float emergencyTemp = (tctlLimit > 0.0f) ? tctlLimit - 2.0f : 93.0f;
         if (m_emergencyLatch) {
@@ -316,56 +332,25 @@ void FanService::Update() {
       m_lastTargetUpdate = now;
     }
 
+    // --- AMD EC Keepalive Strategy ---
+    // The AMD EC has a 3-second hardware watchdog. Refresh targets every 1s
+    // unconditionally so the hardware never drops back to the internal BIOS table.
+    static auto lastAssertTime = std::chrono::steady_clock::now();
+    auto nowAssert = std::chrono::steady_clock::now();
+    int64_t msSinceAssert = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                nowAssert - lastAssertTime).count();
 
-    // --- Heartbeat Strategy ---
-    // BIOS resets WMI control every ~80s.
-    // The EC has a hardware watchdog of 30s (we set it to 0x1E).
-    // If we ping the EC every 15s, we stay well within the 30s limit.
-    // If the app freezes, the 30s hardware watchdog runs out, and fans safely go to Auto.
-    static auto lastEcPing    = std::chrono::steady_clock::now();
-    static auto lastFullAssert = std::chrono::steady_clock::now();
-    auto nowHb = std::chrono::steady_clock::now();
+    bool targetChanged = (m_fan1Target != m_lastAppliedFan1) ||
+                         (m_fan2Target != m_lastAppliedFan2);
 
-    bool ecPingDue = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         nowHb - lastEcPing).count() >= 15000;
-    bool fullAssertDue = std::chrono::duration_cast<std::chrono::seconds>(
-                             nowHb - lastFullAssert).count() >= 60;
-
-    if (ecPingDue) {
-      // EC watchdog is reliable on this firmware. WMI command 0x31 fails
-      // consistently while fan-level command 0x2E succeeds, so do not make
-      // active control depend on unsupported countdown renewal.
-      FanController::Get().Heartbeat();
-      LogFanEvent("[AMDOMEN] fan_heartbeat ec_sent=1 wmi_countdown=disabled\n");
-      lastEcPing = nowHb;
-    }
-
-    // Delta suppression: only write to hardware if target changed by >= 2% or boundary reached
-    bool targetChanged = (std::abs(m_fan1Target - m_lastAppliedFan1) >= 2) ||
-                         (std::abs(m_fan2Target - m_lastAppliedFan2) >= 2);
-    if ((m_fan1Target == 100 && m_lastAppliedFan1 != 100) ||
-        (m_fan1Target == 0 && m_lastAppliedFan1 != 0)) {
-      targetChanged = true;
-    }
-
-    m_persistenceCounter++;
-    if (m_persistenceCounter >= 2) {
-      m_persistenceCounter = 2;
-
-      if (targetChanged || fullAssertDue) {
-        // Full re-assert: EC registers + WMI (defeats BIOS reset)
-        bool wmiOk = FanController::Get().AssertTargets(m_fan1Target,
-                                                        m_fan2Target);
-        LogFanEvent("[AMDOMEN] fan_write cpu=%d gpu=%d wmi_ok=%d\n",
-                    m_fan1Target, m_fan2Target, wmiOk ? 1 : 0);
-        m_fanControlHealthy = wmiOk;
-        m_lastAppliedFan1 = m_fan1Target;
-        m_lastAppliedFan2 = m_fan2Target;
-        if (fullAssertDue) lastFullAssert = nowHb;
-      } else if (ecPingDue) {
-        // EC-only ping: re-enforce speed without WMI overhead
-        FanController::Get().ReassertEc(m_fan1Target, m_fan2Target);
-      }
+    if (targetChanged || msSinceAssert >= 1000) {
+      bool wmiOk = FanController::Get().AssertTargets(m_fan1Target, m_fan2Target);
+      LogFanEvent("[AMDOMEN] fan_write cpu=%d gpu=%d wmi_ok=%d\n",
+                  m_fan1Target, m_fan2Target, wmiOk ? 1 : 0);
+      m_fanControlHealthy = wmiOk;
+      m_lastAppliedFan1 = m_fan1Target;
+      m_lastAppliedFan2 = m_fan2Target;
+      lastAssertTime = nowAssert;
     }
   } else {
     // Auto Mode

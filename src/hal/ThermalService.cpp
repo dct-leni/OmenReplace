@@ -45,7 +45,6 @@ ThermalService &ThermalService::Get() {
 
 ThermalService::ThermalService() {
   m_nvml.Initialize();
-  m_smart.ScanDrives();
 }
 
 void ThermalService::Update() {
@@ -168,6 +167,9 @@ void ThermalService::Update() {
 
   // 3. SSD Temps (Every ~4s)
   if (m_timer % 4 == 0) {
+    if (m_smart.GetDrives().empty()) {
+      m_smart.ScanDrives();
+    }
     m_smart.UpdateTemps();
     // EC fallback for disks where SMART reports no temp (this model).
     auto &drives = m_smart.GetDrives();

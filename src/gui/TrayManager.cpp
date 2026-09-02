@@ -18,6 +18,7 @@
 #define IDM_TRAY_PM_ECO 1009
 #define IDM_TRAY_PM_BALANCED 1010
 #define IDM_TRAY_PM_PERF 1011
+#define IDM_TRAY_PM_TURBO 1012
 
 static void SetFanAuto() { FanService::Get().SetFanAuto(); }
 
@@ -76,6 +77,18 @@ void TrayManager::ThreadMain() {
 static UINT s_uTaskbarRestart = 0;
 
 void TrayManager::SetupIcon(HWND hwnd) {
+  if (!s_uTaskbarRestart)
+    s_uTaskbarRestart = RegisterWindowMessageW(L"TaskbarCreated");
+
+  // Allow lower-integrity processes (explorer.exe) to send TaskbarCreated & tray clicks
+  // when AMDOMEN is running elevated under Task Scheduler (TASK_RUNLEVEL_HIGHEST).
+  ChangeWindowMessageFilter(s_uTaskbarRestart, MSGFLT_ADD);
+  ChangeWindowMessageFilter(WM_TRAYICON, MSGFLT_ADD);
+  ChangeWindowMessageFilter(WM_COMMAND, MSGFLT_ADD);
+  ChangeWindowMessageFilterEx(hwnd, s_uTaskbarRestart, MSGFLT_ALLOW, nullptr);
+  ChangeWindowMessageFilterEx(hwnd, WM_TRAYICON, MSGFLT_ALLOW, nullptr);
+  ChangeWindowMessageFilterEx(hwnd, WM_COMMAND, MSGFLT_ALLOW, nullptr);
+
   ZeroMemory(&m_nid, sizeof(m_nid));
   m_nid.cbSize = sizeof(m_nid);
   m_nid.hWnd = hwnd;
@@ -87,7 +100,13 @@ void TrayManager::SetupIcon(HWND hwnd) {
   wcscpy_s(m_nid.szTip, L"AMDOMEN");
   // Delete any existing icon first (in case of taskbar reload/reset)
   Shell_NotifyIconW(NIM_DELETE, &m_nid);
-  Shell_NotifyIconW(NIM_ADD, &m_nid);
+  BOOL added = Shell_NotifyIconW(NIM_ADD, &m_nid);
+  if (!added) {
+    // If explorer.exe is still initializing during logon, retry every 1.5s until added
+    SetTimer(hwnd, 101, 1500, nullptr);
+  } else {
+    KillTimer(hwnd, 101);
+  }
 }
 
 LRESULT CALLBACK TrayManager::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
@@ -99,7 +118,17 @@ LRESULT CALLBACK TrayManager::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)self);
     if (!s_uTaskbarRestart)
       s_uTaskbarRestart = RegisterWindowMessageW(L"TaskbarCreated");
+    ChangeWindowMessageFilter(s_uTaskbarRestart, MSGFLT_ADD);
+    ChangeWindowMessageFilter(WM_TRAYICON, MSGFLT_ADD);
+    ChangeWindowMessageFilter(WM_COMMAND, MSGFLT_ADD);
+    ChangeWindowMessageFilterEx(hwnd, s_uTaskbarRestart, MSGFLT_ALLOW, nullptr);
+    ChangeWindowMessageFilterEx(hwnd, WM_TRAYICON, MSGFLT_ALLOW, nullptr);
+    ChangeWindowMessageFilterEx(hwnd, WM_COMMAND, MSGFLT_ALLOW, nullptr);
     return TRUE;
+  }
+  if (msg == WM_TIMER && wParam == 101) {
+    if (self) self->SetupIcon(hwnd);
+    return 0;
   }
   if (s_uTaskbarRestart != 0 && msg == s_uTaskbarRestart) {
     if (self) self->SetupIcon(hwnd);
@@ -160,6 +189,8 @@ void TrayManager::HandleMenu(HWND hwnd) {
               IDM_TRAY_PM_BALANCED, L"Balanced");
   AppendMenuW(pmMenu, MF_STRING | (pm == 2 ? MF_CHECKED : MF_UNCHECKED),
               IDM_TRAY_PM_PERF, L"Performance");
+  AppendMenuW(pmMenu, MF_STRING | (pm == 3 ? MF_CHECKED : MF_UNCHECKED),
+              IDM_TRAY_PM_TURBO, L"Turbo");
   AppendMenuW(menu, MF_POPUP, (UINT_PTR)pmMenu, L"Power Mode");
 
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -204,6 +235,9 @@ void TrayManager::HandleMenu(HWND hwnd) {
     break;
   case IDM_TRAY_PM_PERF:
     OmenHal::Get().SetPowerMode(2);
+    break;
+  case IDM_TRAY_PM_TURBO:
+    OmenHal::Get().SetPowerMode(3);
     break;
   case IDM_TRAY_EXIT: {
     HWND main = FindWindowW(L"AMDOMEN_MAIN_WIN32", nullptr);

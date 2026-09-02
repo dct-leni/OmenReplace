@@ -76,15 +76,6 @@ bool OmenHal::Initialize() {
   ThermalService::Get();
   FanService::Get();
   PowerControl::Get();
-  PowerControl::Get().InitGpuMux(); // one-time GPU MUX probe (requires reboot to change)
-
-  if (!m_initialized) {
-    WmiHelper wmi;
-    if (wmi.Initialize()) {
-      m_isDesktop = wmi.IsDesktopMode();
-      wmi.Cleanup();
-    }
-  }
 
   {
     char buf[256] = {};
@@ -136,7 +127,17 @@ bool OmenHal::SetBatteryChargeLimit(int percentage) {
   return PowerControl::Get().SetBatteryChargeLimit(percentage);
 }
 
+bool OmenHal::GetDisplayOverdrive() {
+  return PowerControl::Get().GetDisplayOverdrive();
+}
+
+bool OmenHal::SetDisplayOverdrive(bool enable) {
+  return PowerControl::Get().SetDisplayOverdrive(enable);
+}
+
 bool OmenHal::SetAmdCurveOptimizer(int coCounts) {
+  FanService::Get().GetOverlayConfig().amdCurveOptimizer = coCounts;
+  PowerControl::Get().SetCachedAmdCurveOptimizer(coCounts);
   return PowerControl::Get().SetAmdCurveOptimizer(coCounts);
 }
 
@@ -182,21 +183,107 @@ void OmenHal::BackgroundLoop() {
                   (unsigned long)comResult);
     OmenLog("%s", message);
     m_fanControlReady = true;
+    PowerControl::Get().InitGpuMux();
+    WmiHelper wmi;
+    if (wmi.Initialize()) {
+      m_isDesktop = wmi.IsDesktopMode();
+      wmi.Cleanup();
+    }
   }
 
-  if (FanService::Get().GetControlMode() == FanControlMode::AppMode) {
-    m_fanControlActive = true;
-    FanService::Get().SetProfile(FanService::Get().GetProfile());
-  }
-
-  // Startup re-apply of the saved power limits with verification. The early
-  // SetMode from LoadConfig runs milliseconds after PawnIO module load and the
-  // SMU/firmware can drop or override it. Retry until MP1 readback matches.
+  // ═════════════════════════════════════════════════════════════════════════
+  // STARTUP DISCOVERY & SYNC PIPELINE (First Read, Then Write If Different)
+  // ═════════════════════════════════════════════════════════════════════════
   {
-    // Per-mode PPT targets must mirror PowerControl::SetMode's table.
-    PowerMode saved = PowerControl::Get().GetCurrentMode();
+    // PHASE 1: Read Actual Hardware States
+    PowerMode hwPowerMode = PowerControl::Get().ReadHardwarePowerMode();
+    int hwGpuPower = PowerControl::Get().ReadHardwareGpuPower();
+    int hwCo = PowerControl::Get().ReadHardwareAmdCurveOptimizer();
+    int hwTctl = PowerControl::Get().ReadHardwareTctlLimit();
+    int hwBattery = PowerControl::Get().ReadHardwareBatteryLimit();
+    bool hwOverdrive = PowerControl::Get().ReadHardwareDisplayOverdrive();
+    int hwPowerW = 0, hwTempC = 0;
+    PowerControl::Get().GetPowerThermalLimits(hwPowerW, hwTempC);
+
+    OmenLog("[AMDOMEN] Startup HW Discovery: PowerMode=%d, GPU=%d, CO=%d, Tctl=%dC, Battery=%d%%, Overdrive=%d, PPT=%dW\n",
+            (int)hwPowerMode, hwGpuPower, hwCo, hwTctl, hwBattery, hwOverdrive ? 1 : 0, hwPowerW);
+
+    // PHASE 2: Compare with Config Targets
+    auto &cfg = FanService::Get().GetOverlayConfig();
+    PowerMode targetMode = static_cast<PowerMode>(cfg.powerMode);
+    if (targetMode == PowerMode::Turbo) {
+      targetMode = PowerMode::Performance;
+    }
+    int targetGpuPower = cfg.gpuPowerLevel;
+    if (targetGpuPower < 0 || targetGpuPower > 2) {
+      if (targetMode == PowerMode::Eco) targetGpuPower = 0;
+      else if (targetMode == PowerMode::Balanced) targetGpuPower = 1;
+      else targetGpuPower = 2;
+    }
+    int targetCo = cfg.amdCurveOptimizer;
+    int targetTctl = cfg.tctlLimit;
+    int targetBattery = cfg.batteryLimit;
+    bool targetOverdrive = cfg.displayOverdrive;
+
+    // PHASE 3: Write Only If Different (Never spam redundant power schemes)
+    if (hwPowerMode != targetMode) {
+      OmenLog("[AMDOMEN] PowerMode differs (HW=%d, Cfg=%d) -> Applying target\n",
+              (int)hwPowerMode, (int)targetMode);
+      PowerControl::Get().SetMode(targetMode);
+    } else {
+      OmenLog("[AMDOMEN] PowerMode matches target (%d) - no change needed\n", (int)targetMode);
+    }
+
+    if (hwGpuPower != targetGpuPower) {
+      OmenLog("[AMDOMEN] GPU Power differs (HW=%d, Cfg=%d) -> Applying target\n",
+              hwGpuPower, targetGpuPower);
+      PowerControl::Get().SetGpuPower((uint8_t)targetGpuPower);
+    } else {
+      OmenLog("[AMDOMEN] GPU Power matches target (%d) - no change needed\n", targetGpuPower);
+    }
+
+    if (targetCo != 0 && hwCo != targetCo) {
+      OmenLog("[AMDOMEN] AMD CO differs (HW=%d, Cfg=%d) -> Applying target\n",
+              hwCo, targetCo);
+      PowerControl::Get().SetAmdCurveOptimizer(targetCo);
+    }
+
+    if (targetTctl > 0 && hwTctl != targetTctl) {
+      OmenLog("[AMDOMEN] Tctl Limit differs (HW=%dC, Cfg=%dC) -> Applying target\n",
+              hwTctl, targetTctl);
+      PowerControl::Get().SetTctlTemp(targetTctl);
+    }
+
+    if (targetBattery <= 80 && hwBattery != targetBattery) {
+      OmenLog("[AMDOMEN] Battery Limit differs (HW=%d%%, Cfg=%d%%) -> Applying target\n",
+              hwBattery, targetBattery);
+      PowerControl::Get().SetBatteryChargeLimit(targetBattery);
+    }
+
+    if (hwOverdrive != targetOverdrive) {
+      OmenLog("[AMDOMEN] Display Overdrive differs (HW=%d, Cfg=%d) -> Applying target\n",
+              hwOverdrive ? 1 : 0, targetOverdrive ? 1 : 0);
+      PowerControl::Get().SetDisplayOverdrive(targetOverdrive);
+    }
+
+    if (cfg.wakeOnLan) {
+      PowerControl::Get().SetWakeOnLan(true);
+    }
+    if (cfg.wakeOnWlanBt) {
+      PowerControl::Get().SetWakeOnWlanBt(true);
+    }
+
+    if (FanService::Get().GetControlMode() == FanControlMode::AppMode) {
+      m_fanControlActive = true;
+      FanService::Get().SetProfile(FanService::Get().GetProfile());
+      OmenLog("[AMDOMEN] Fan mode active with profile=%d\n", (int)FanService::Get().GetProfile());
+    } else {
+      OmenLog("[AMDOMEN] Fan mode BIOS Auto\n");
+    }
+
+    // PPT Readback Verification Loop
     int fast = 0, slow = 0, stapm = 0;
-    switch (saved) {
+    switch (targetMode) {
     case PowerMode::Eco:         fast = 35;  slow = 25; stapm = 25; break;
     case PowerMode::Balanced:    fast = 54;  slow = 45; stapm = 45; break;
     case PowerMode::Performance: fast = 90;  slow = 75; stapm = 75; break;
@@ -206,38 +293,18 @@ void OmenHal::BackgroundLoop() {
 
     auto diff = [](int a, int b) { return a > b ? a - b : b - a; };
 
-    for (int attempt = 1; fast > 0 && attempt <= 5 && !m_stopWorker;
-         attempt++) {
-      std::this_thread::sleep_for(std::chrono::seconds(2));
+    for (int attempt = 1; fast > 0 && attempt <= 5 && !m_stopWorker; attempt++) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1500));
       if (m_stopWorker) break;
-      PowerControl::Get().SetMode(saved);
       int pw = 0, tc = 0;
-      if (!PowerControl::Get().GetPowerThermalLimits(pw, tc)) {
-        OmenLog("[AMDOMEN] startup power verify attempt=%d readback FAILED\n",
-                attempt);
-        continue;
+      if (PowerControl::Get().GetPowerThermalLimits(pw, tc)) {
+        if (diff(pw, fast) <= 2 || diff(pw, slow) <= 2 || diff(pw, stapm) <= 2) {
+          OmenLog("[AMDOMEN] Startup power limit verified %dW (tctl %dC) on attempt %d\n",
+                  pw, tc, attempt);
+          break;
+        }
       }
-      // The MP1 0x23 sustained-power field does not echo STAPM verbatim on
-      // this firmware (observed ~fast-limit + margin). Accept a match within
-      // 2W of ANY of the three limits we applied.
-      if (diff(pw, fast) <= 2 || diff(pw, slow) <= 2 || diff(pw, stapm) <= 2) {
-        OmenLog("[AMDOMEN] startup power limit verified %dW (tctl %dC) on "
-                "attempt %d\n",
-                pw, tc, attempt);
-        break;
-      }
-      OmenLog("[AMDOMEN] startup power verify attempt=%d got=%dW tctl=%dC "
-              "(targets %d/%d/%dW)\n",
-              attempt, pw, tc, fast, slow, stapm);
-    }
-  }
-
-  // Apply persisted CPU temp (Tctl) limit. 0 = Auto (leave firmware default).
-  {
-    int tctl = FanService::Get().GetOverlayConfig().tctlLimit;
-    if (tctl > 0) {
-      PowerControl::Get().SetTctlTemp(tctl);
-      OmenLog("[AMDOMEN] startup tctl_limit applied %dC\n", tctl);
+      PowerControl::Get().SetMode(targetMode);
     }
   }
 
@@ -388,8 +455,12 @@ void OmenHal::SetFanAuto() { FanService::Get().SetFanAuto(); }
 
 void OmenHal::SetPowerMode(int mode) {
   PowerControl::Get().SetMode((PowerMode)mode);
-  // Performance mode benefits from the aggressive Cool fan profile.
-  if (mode == (int)PowerMode::Performance || mode == (int)PowerMode::Turbo) {
+  if (mode == (int)PowerMode::Eco) {
+    PowerControl::Get().SetGpuPowerOverride(0); // None
+  } else if (mode == (int)PowerMode::Balanced) {
+    PowerControl::Get().SetGpuPowerOverride(1); // TGP
+  } else if (mode == (int)PowerMode::Performance || mode == (int)PowerMode::Turbo) {
+    PowerControl::Get().SetGpuPowerOverride(2); // +Boost
     FanService::Get().SetControlMode(FanControlMode::AppMode);
     FanService::Get().SetProfile(FanControlProfile::Cool);
   }
@@ -415,3 +486,8 @@ void OmenHal::SetFanControlMode(int mode) {
 }
 
 void OmenHal::OptimizeMemory() { MemoryService::Get().Optimize(); }
+
+bool OmenHal::GetWakeOnLan() { return PowerControl::Get().GetWakeOnLan(); }
+bool OmenHal::SetWakeOnLan(bool enable) { return PowerControl::Get().SetWakeOnLan(enable); }
+bool OmenHal::GetWakeOnWlanBt() { return PowerControl::Get().GetWakeOnWlanBt(); }
+bool OmenHal::SetWakeOnWlanBt(bool enable) { return PowerControl::Get().SetWakeOnWlanBt(enable); }

@@ -38,7 +38,9 @@ public:
     float sizeW = 180.0f;
     float sizeH = 135.0f;
     // System settings
+    int powerMode = 1; // 0=Eco, 1=Balanced, 2=Perf
     int batteryLimit = 80;
+    bool displayOverdrive = true;
     bool minimizeOnClose = true;
     bool logEnabled = false;
     // GPU power (TGP) override: -1=Auto, 0..2=Min/Med/Max
@@ -47,6 +49,11 @@ public:
     bool gameAutoProfile = false;  // Perf+Cool while a game is fullscreen
     // CPU temp (Tctl) limit via MP1 0x3F. 0 = Auto (firmware default).
     int tctlLimit = 90;
+    // AMD All-Core Curve Optimizer (-30..0)
+    int amdCurveOptimizer = 0;
+    // Wake settings (Windows driver + HP BIOS S4/S5 & WLAN/BT)
+    bool wakeOnLan = false;
+    bool wakeOnWlanBt = false;
     // Embedded API configuration
     bool apiEnabled = true;
     int apiPort = 8080;
@@ -130,34 +137,30 @@ private:
 
     int Compute(float currentTemp, float avgTemp, uint64_t nowMs) {
       // 1. Curve tables:
-      // Default (Normal): Inaudible at idle, progressive linear ramp under load, 100% at high temps.
+      // Default (Normal): Inaudible at idle, progressive linear ramp under load, 100% at 85°C.
       static const CurvePoint kDefaultCurve[] = {
         { 40.0f, 18 }, // Whisper quiet idle
-        { 50.0f, 25 },
-        { 60.0f, 38 },
-        { 70.0f, 52 },
-        { 80.0f, 70 },
-        { 88.0f, 88 },
-        { 93.0f, 100 }
+        { 55.0f, 30 },
+        { 68.0f, 50 },
+        { 78.0f, 75 },
+        { 85.0f, 100 } // Full 5500/5700 RPM ceiling
       };
-      // Quiet: Low acoustics priority. Keeps fans <=45% up to 78°C, only ramps if approaching safety limits.
+      // Quiet: Low acoustics priority. Keeps fans <=50% up to 80°C, only ramps if approaching safety limits.
       static const CurvePoint kQuietCurve[] = {
         { 48.0f, 15 }, // Silent baseline
-        { 58.0f, 22 },
-        { 68.0f, 32 },
-        { 78.0f, 45 },
-        { 86.0f, 60 },
-        { 92.0f, 80 },
-        { 95.0f, 100 }
+        { 60.0f, 25 },
+        { 72.0f, 40 },
+        { 80.0f, 55 },
+        { 88.0f, 80 },
+        { 92.0f, 100 }
       };
-      // Cool: Max cooling performance. Higher baseline pre-cooling and fast ramp to 100% at 80°C.
+      // Cool: Max cooling performance. Aggressive pre-cooling and full 100% (5500/5700 RPM) at 75°C.
       static const CurvePoint kCoolCurve[] = {
-        { 35.0f, 30 }, // High baseline pre-cooling
-        { 45.0f, 45 },
-        { 55.0f, 60 },
-        { 65.0f, 75 },
-        { 75.0f, 90 },
-        { 80.0f, 100 }
+        { 35.0f, 35 }, // High baseline pre-cooling
+        { 48.0f, 55 },
+        { 60.0f, 75 },
+        { 70.0f, 90 },
+        { 75.0f, 100 } // Full 5500/5700 RPM max cooling
       };
 
       const CurvePoint* activeCurve = kDefaultCurve;
@@ -170,9 +173,11 @@ private:
         curvePoints = sizeof(kCoolCurve) / sizeof(kCoolCurve[0]);
       }
 
-      // Blend instantaneous die temperature with smoothed average.
-      // If a sudden thermal spike occurs (current > avg + 3°C), react immediately; otherwise track smooth avg.
-      float controlTemp = (currentTemp > avgTemp + 3.0f) ? (currentTemp - 1.5f) : avgTemp;
+      // Fast-track control temperature:
+      // - In heavy load / high thermal zone (>=84°C), evaluate instantaneous die temp directly (zero lag).
+      // - If a thermal jump occurs (current > avg + 2°C), track instantaneous die temp immediately.
+      // - Otherwise follow smooth EMA average to prevent idle jitter.
+      float controlTemp = (currentTemp >= 84.0f || currentTemp > avgTemp + 2.0f) ? currentTemp : avgTemp;
       int rawTarget = Interpolate(controlTemp, activeCurve, curvePoints);
 
       if (lastTimeMs == 0) {

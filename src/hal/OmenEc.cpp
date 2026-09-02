@@ -200,16 +200,16 @@ void OmenEc::WriteByte(uint8_t offset, uint8_t value) {
 
 float OmenEc::GetFan1Speed() {
   // Fan RPM tach not exposed in EC on this model — estimate from duty %.
-  // ~100% duty ≈ 5000 RPM (calibrated against real readings).
+  // ~100% duty ≈ 5800-6000 RPM (calibrated against real readings).
   float duty = (float)ReadByte(EC_XGS1);
   if (duty > 0.0f && duty <= 100.0f)
-    return duty * 50.0f;
+    return duty * 58.0f;
   return 0.0f;
 }
 float OmenEc::GetFan2Speed() {
   float duty = (float)ReadByte(EC_XGS2);
   if (duty > 0.0f && duty <= 100.0f)
-    return duty * 50.0f;
+    return duty * 58.0f;
   return 0.0f;
 }
 float OmenEc::GetFan1Percentage() { return (float)ReadByte(EC_XGS1); }
@@ -303,14 +303,22 @@ void OmenEc::SetFanSpeedPercent(int fanIndex, int percent) {
     percent = 100;
 
   uint8_t valPercent = (uint8_t)percent;
-  uint8_t valKrpm = (uint8_t)((percent * 55) / 100);
 
   if (fanIndex == 0) {
+    uint8_t valKrpm = (uint8_t)((percent * 55) / 100);
     WriteByte(EC_XSS1, valPercent);
     WriteByte(0x34, valKrpm); 
   } else {
+    uint8_t valKrpm = (uint8_t)((percent * 57) / 100);
     WriteByte(EC_XSS2, valPercent);
     WriteByte(0x35, valKrpm); 
+  }
+
+  // EC_FFFF (0xEC) controls hardware Fan Boost: 0x0C = Max Boost (5500/5700 RPM), 0x00 = Regular
+  if (percent >= 95) {
+    WriteByte(EC_FFFF, 0x0C);
+  } else {
+    WriteByte(EC_FFFF, 0x00);
   }
 
   WriteByte(EC_OMCC, 0x06); 

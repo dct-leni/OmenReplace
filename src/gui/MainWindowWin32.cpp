@@ -12,6 +12,7 @@
 
 #include "../hal/ApiServer.h"
 #include "../hal/FanService.h"
+#include "../hal/MemoryService.h"
 #include "../hal/OmenHal.h"
 #include "../hal/OmenLog.h"
 #include "../hal/PowerControl.h"
@@ -20,6 +21,8 @@
 #include <comdef.h>
 #include <taskschd.h>
 
+#include <gdiplus.h>
+#pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -27,7 +30,7 @@
 
 namespace {
 constexpr int kWidth = 306;
-constexpr int kHeight = 735;
+constexpr int kHeight = 670;
 constexpr int kCardPad = 8;
 constexpr int kRowH = 22;
 
@@ -133,6 +136,10 @@ static bool RegisterAutoStartTaskNative(const wchar_t *exePath) {
       IExecAction *pExecAction = nullptr;
       if (SUCCEEDED(pAction->QueryInterface(IID_IExecAction, (void **)&pExecAction))) {
         pExecAction->put_Path(_bstr_t(exePath));
+        std::wstring dir(exePath);
+        size_t sep = dir.find_last_of(L"\\/");
+        if (sep != std::wstring::npos) dir = dir.substr(0, sep);
+        pExecAction->put_WorkingDirectory(_bstr_t(dir.c_str()));
         pExecAction->Release();
       }
       pAction->Release();
@@ -250,7 +257,7 @@ MainWindowWin32::MainWindowWin32() {
   if (!m_smallFont)
     m_smallFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                              CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                              CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                               DEFAULT_PITCH, L"Segoe UI");
 }
 
@@ -264,6 +271,13 @@ MainWindowWin32::~MainWindowWin32() {
 void MainWindowWin32::RegisterClassOnce() {
   static bool registered = false;
   if (registered) return;
+
+  static ULONG_PTR s_gdiplusToken = 0;
+  if (!s_gdiplusToken) {
+    Gdiplus::GdiplusStartupInput gdiplusStartupInput;
+    Gdiplus::GdiplusStartup(&s_gdiplusToken, &gdiplusStartupInput, nullptr);
+  }
+
   WNDCLASSEXW wc = {};
   wc.cbSize = sizeof(wc);
   wc.lpfnWndProc = WndProc;
@@ -318,6 +332,37 @@ void MainWindowWin32::Run() {
   }
 }
 
+void MainWindowWin32::UpdateWindowHeight() {
+  if (!m_hwnd || m_requiredClientH <= 0) return;
+  RECT rc;
+  if (GetClientRect(m_hwnd, &rc)) {
+    int delta = m_requiredClientH - rc.bottom;
+    if (delta != 0) {
+      RECT wr;
+      if (GetWindowRect(m_hwnd, &wr)) {
+        int newW = wr.right - wr.left;
+        int newH = wr.bottom - wr.top + delta;
+        int newX = wr.left;
+        int newY = wr.top;
+
+        HMONITOR hMon = MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi = {sizeof(mi)};
+        if (GetMonitorInfoW(hMon, &mi)) {
+          if (newY + newH > mi.rcWork.bottom) {
+            newY = mi.rcWork.bottom - newH;
+          }
+          if (newY < mi.rcWork.top) {
+            newY = mi.rcWork.top;
+          }
+        }
+
+        SetWindowPos(m_hwnd, nullptr, newX, newY, newW, newH,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+      }
+    }
+  }
+}
+
 LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
                                           LPARAM lp) {
   MainWindowWin32 *self = nullptr;
@@ -334,23 +379,9 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
   case WM_PAINT: {
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(hwnd, &ps);
-    if (self) self->OnPaint(hdc);
-    // Auto-fit window height to content once after first paint.
-    if (self && self->m_requiredClientH > 0 && !self->m_autoSized) {
-      self->m_autoSized = true;
-      RECT rc;
-      if (GetClientRect(hwnd, &rc)) {
-        int delta = self->m_requiredClientH - rc.bottom;
-        OmenLog("[AMDOMEN] win32 autofit required=%d client=%d delta=%d\n",
-                self->m_requiredClientH, rc.bottom, delta);
-        if (delta != 0) {
-          RECT wr;
-          if (GetWindowRect(hwnd, &wr))
-            SetWindowPos(hwnd, nullptr, 0, 0, wr.right - wr.left,
-                         wr.bottom - wr.top + delta,
-                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-        }
-      }
+    if (self) {
+      self->OnPaint(hdc);
+      self->UpdateWindowHeight();
     }
     EndPaint(hwnd, &ps);
     return 0;
@@ -368,15 +399,23 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
       if (self->m_draggingSlider) {
         self->OnLButtonDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
       } else {
-        // Hover detection for the GPU Power hint.
         int mx = GET_X_LPARAM(lp), my = GET_Y_LPARAM(lp);
-        bool inside = mx >= self->m_gpHoverRect[2] && mx <= self->m_gpHoverRect[3] &&
-                      my >= self->m_gpHoverRect[0] && my <= self->m_gpHoverRect[1];
-        if (inside != self->m_hoverGp) {
-          self->m_hoverGp = inside;
+        bool insidePower = mx >= self->m_powerHoverRect[2] && mx <= self->m_powerHoverRect[3] &&
+                           my >= self->m_powerHoverRect[0] && my <= self->m_powerHoverRect[1];
+        bool insideFan = mx >= self->m_fanHoverRect[2] && mx <= self->m_fanHoverRect[3] &&
+                         my >= self->m_fanHoverRect[0] && my <= self->m_fanHoverRect[1];
+        bool insideGp = mx >= self->m_gpHoverRect[2] && mx <= self->m_gpHoverRect[3] &&
+                        my >= self->m_gpHoverRect[0] && my <= self->m_gpHoverRect[1];
+
+        bool changed = false;
+        if (insidePower != self->m_hoverPower) { self->m_hoverPower = insidePower; changed = true; }
+        if (insideFan != self->m_hoverFan) { self->m_hoverFan = insideFan; changed = true; }
+        if (insideGp != self->m_hoverGp) { self->m_hoverGp = insideGp; changed = true; }
+
+        if (changed) {
           InvalidateRect(hwnd, nullptr, FALSE);
         }
-        if (inside && !self->m_trackMouse) {
+        if ((insidePower || insideFan || insideGp) && !self->m_trackMouse) {
           TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, hwnd, 0};
           TrackMouseEvent(&tme);
           self->m_trackMouse = true;
@@ -387,6 +426,8 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
   }
   case WM_MOUSELEAVE:
     if (self) {
+      self->m_hoverPower = false;
+      self->m_hoverFan = false;
       self->m_hoverGp = false;
       self->m_trackMouse = false;
       InvalidateRect(hwnd, nullptr, FALSE);
@@ -413,7 +454,7 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
       bool isInteractive = false;
 
       // Power pills
-      for (int i = 0; i < 3; i++) {
+      for (int i = 0; i < 4; i++) {
         if (x >= self->m_powerPill[i][2] && x <= self->m_powerPill[i][3] &&
             y >= self->m_powerPill[i][0] && y <= self->m_powerPill[i][1]) {
           isInteractive = true; break;
@@ -439,7 +480,7 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
       }
       // GPU power pills + System collapse title
       if (!isInteractive) {
-        for (int i = 0; i < 4 && !isInteractive; i++) {
+        for (int i = 0; i < 3 && !isInteractive; i++) {
           if (x >= self->m_gpPill[i][2] && x <= self->m_gpPill[i][3] &&
               y >= self->m_gpPill[i][0] && y <= self->m_gpPill[i][1]) {
             isInteractive = true;
@@ -470,7 +511,7 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
       }
       // Toggle switches
       if (!isInteractive) {
-        for (int i = 0; i < 9; i++) {
+        for (int i = 0; i < 11; i++) {
           if (x >= self->m_chk[i][2] && x <= self->m_chk[i][3] &&
               y >= self->m_chk[i][0] && y <= self->m_chk[i][1]) {
             isInteractive = true; break;
@@ -543,7 +584,7 @@ void MainWindowWin32::OnTimer() {
 
 void MainWindowWin32::OnLButtonDown(int x, int y) {
   // Power mode pills.
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 4; i++) {
     if (x >= m_powerPill[i][2] && x <= m_powerPill[i][3] &&
         y >= m_powerPill[i][0] && y <= m_powerPill[i][1]) {
       OmenHal::Get().SetPowerMode(i);
@@ -575,28 +616,24 @@ void MainWindowWin32::OnLButtonDown(int x, int y) {
     }
   }
 
-  // GPU Power pills: Auto | Min | Med | Max.
-  for (int i = 0; i < 4; i++) {
+  // GPU Power pills: None | TGP | +Boost.
+  for (int i = 0; i < 3; i++) {
     if (x >= m_gpPill[i][2] && x <= m_gpPill[i][3] &&
         y >= m_gpPill[i][0] && y <= m_gpPill[i][1]) {
-      static const int vals[4] = {-1, 0, 1, 2};
-      int level = vals[i];
-      PowerControl::Get().SetGpuPowerOverride(level);
-      if (level >= 0)
-        PowerControl::Get().SetGpuPower((uint8_t)level);
+      PowerControl::Get().SetGpuPowerOverride(i);
+      PowerControl::Get().SetGpuPower((uint8_t)i);
       auto &cfg = FanService::Get().GetOverlayConfig();
-      cfg.gpuPowerLevel = level;
+      cfg.gpuPowerLevel = i;
       FanService::Get().SaveConfig();
       InvalidateRect(m_hwnd, nullptr, FALSE);
       return;
     }
   }
 
-  // System Options title: collapse/expand (session-only, always starts compact).
+  // System Options title: collapse/expand
   if (x >= m_sysTitle[2] && x <= m_sysTitle[3] && y >= m_sysTitle[0] &&
       y <= m_sysTitle[1]) {
     m_systemExpanded = !m_systemExpanded;
-    m_autoSized = false; // re-fit window height on next paint
     InvalidateRect(m_hwnd, nullptr, FALSE);
     return;
   }
@@ -677,8 +714,8 @@ void MainWindowWin32::OnLButtonDown(int x, int y) {
     return;
   }
   // Checkboxes / Toggle Switches: battery, autostart, minimize, showhud,
-  // passive, api, wol, autopower, gameauto.
-  for (int i = 0; i < 9; i++) {
+  // passive, api, wol, autopower, gameauto, overdrive, wlanbt.
+  for (int i = 0; i < 11; i++) {
     if (x >= m_chk[i][2] && x <= m_chk[i][3] && y >= m_chk[i][0] &&
         y <= m_chk[i][1]) {
       switch (i) {
@@ -728,7 +765,7 @@ void MainWindowWin32::OnLButtonDown(int x, int y) {
         break;
       }
       case 6: {
-        // Wake-on-LAN — toggle real NIC state (cache updated on success).
+        // Wake-on-LAN — toggle real NIC state + BIOS S3/S4/S5.
         bool cur = PowerControl::Get().GetWakeOnLan();
         PowerControl::Get().SetWakeOnLan(!cur);
         break;
@@ -744,6 +781,17 @@ void MainWindowWin32::OnLButtonDown(int x, int y) {
         auto &cfg = FanService::Get().GetOverlayConfig();
         cfg.gameAutoProfile = !cfg.gameAutoProfile;
         FanService::Get().SaveConfig();
+        break;
+      }
+      case 9: {
+        bool cur = OmenHal::Get().GetDisplayOverdrive();
+        OmenHal::Get().SetDisplayOverdrive(!cur);
+        break;
+      }
+      case 10: {
+        // Wake on WLAN/BT — toggle Wireless & Bluetooth wake.
+        bool cur = PowerControl::Get().GetWakeOnWlanBt();
+        PowerControl::Get().SetWakeOnWlanBt(!cur);
         break;
       }
       }
@@ -778,24 +826,36 @@ void MainWindowWin32::OnPaint(HDC hdc) {
 
   SetBkMode(mem, TRANSPARENT);
 
-  auto cardBg = [&](int y, int cardH) {
-    RECT c = { kCardPad, y, w - kCardPad, y + cardH };
-    // Elevated card background: #121218 (RGB 18, 18, 24)
-    HBRUSH b = CreateSolidBrush(RGB(18, 18, 24));
-    HGDIOBJ old = SelectObject(mem, b);
-    RoundRect(mem, c.left, c.top, c.right, c.bottom, 12, 12);
-    SelectObject(mem, old);
-    DeleteObject(b);
+  auto fillRoundRect = [](Gdiplus::Graphics &g, float x, float y, float w, float h, float r,
+                          const Gdiplus::Brush &brush, const Gdiplus::Pen *pen = nullptr) {
+    if (w <= 0 || h <= 0) return;
+    Gdiplus::GraphicsPath path;
+    float d = r * 2.0f;
+    if (d > w) d = w;
+    if (d > h) d = h;
+    path.AddArc(x, y, d, d, 180.0f, 90.0f);
+    path.AddArc(x + w - d, y, d, d, 270.0f, 90.0f);
+    path.AddArc(x + w - d, y + h - d, d, d, 0.0f, 90.0f);
+    path.AddArc(x, y + h - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+    g.FillPath(&brush, &path);
+    if (pen) {
+      g.DrawPath(pen, &path);
+    }
+  };
 
-    // Stroke a 1px subtle rounded border: #242430 (RGB 36, 36, 48)
-    HBRUSH nb = (HBRUSH)GetStockObject(NULL_BRUSH);
-    HPEN p = CreatePen(PS_SOLID, 1, RGB(36, 36, 48));
-    old = SelectObject(mem, nb);
-    HGDIOBJ oldPen = SelectObject(mem, p);
-    RoundRect(mem, c.left, c.top, c.right, c.bottom, 12, 12);
-    SelectObject(mem, oldPen);
-    SelectObject(mem, old);
-    DeleteObject(p);
+  auto cardBg = [&](int y, int cardH) {
+    float cx = (float)kCardPad;
+    float cy = (float)y;
+    float cw = (float)(w - 2 * kCardPad);
+    float ch = (float)cardH;
+
+    Gdiplus::Graphics g(mem);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+    Gdiplus::SolidBrush cardBrush(Gdiplus::Color(255, 18, 18, 24));
+    Gdiplus::Pen borderPen(Gdiplus::Color(255, 36, 36, 48), 1.0f);
+    fillRoundRect(g, cx, cy, cw, ch, 10.0f, cardBrush, &borderPen);
   };
 
   auto cardTitle = [&](int y, const wchar_t *t) {
@@ -847,42 +907,46 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     SetTextColor(mem, vc);
     DrawTextW(mem, value, -1, &vr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
-    // 4px height rounded load bar
+    // 4px height rounded load bar with GDI+ anti-aliasing
     int barY = y + kRowH + 2;
-    RECT tr = { kCardPad + 12, barY, w - kCardPad - 12, barY + 4 };
-    HBRUSH tb = CreateSolidBrush(RGB(28, 28, 36));
-    HGDIOBJ oldTb = SelectObject(mem, tb);
-    RoundRect(mem, tr.left, tr.top, tr.right, tr.bottom, 4, 4);
-    SelectObject(mem, oldTb);
-    DeleteObject(tb);
+    float bx = (float)(kCardPad + 12);
+    float by = (float)barY;
+    float bw = (float)(w - 2 * kCardPad - 24);
+    float bh = 4.0f;
+
+    Gdiplus::Graphics g(mem);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+    Gdiplus::SolidBrush trackBrush(Gdiplus::Color(255, 28, 28, 36));
+    fillRoundRect(g, bx, by, bw, bh, 2.0f, trackBrush);
 
     float ratio = std::clamp(load / 100.0f, 0.0f, 1.0f);
-    int fillW = (int)((float)(tr.right - tr.left) * ratio);
-    if (fillW > 0) {
-      RECT fr = { tr.left, tr.top, tr.left + fillW, tr.bottom };
-      COLORREF barColor = RGB(139, 38, 42);
-      if (load > 85.0f) barColor = RGB(230, 50, 50);
-      else if (load > 70.0f) barColor = RGB(230, 180, 40);
+    float fillW = bw * ratio;
+    if (fillW > 2.0f) {
+      Gdiplus::Color barColor(255, 139, 38, 42);
+      if (load > 85.0f) barColor = Gdiplus::Color(255, 230, 50, 50);
+      else if (load > 70.0f) barColor = Gdiplus::Color(255, 230, 180, 40);
 
-      HBRUSH fb = CreateSolidBrush(barColor);
-      HGDIOBJ oldFb = SelectObject(mem, fb);
-      RoundRect(mem, fr.left, fr.top, std::max(fr.left + 4, fr.right), fr.bottom, 4, 4);
-      SelectObject(mem, oldFb);
-      DeleteObject(fb);
+      Gdiplus::SolidBrush fillBrush(barColor);
+      fillRoundRect(g, bx, by, fillW, bh, 2.0f, fillBrush);
     }
   };
 
   auto pillRow = [&](int y, int count, const wchar_t *const *labels,
                      int active, int (*rects)[4], int x0, int x1) {
-    int gap = 0;
-    int pw = (x1 - x0 - (count - 1) * gap) / count;
+    int gap = 2;
+    int totalW = x1 - x0;
+    int pw = (totalW - (count - 1) * gap) / count;
     int ph = 26;
-    // Track #181820, active #8b262a, rounded 8px
-    HBRUSH tb = CreateSolidBrush(RGB(24, 24, 32));
-    HGDIOBJ oldTb = SelectObject(mem, tb);
-    RoundRect(mem, x0, y, x1, y + ph, 8, 8);
-    SelectObject(mem, oldTb);
-    DeleteObject(tb);
+
+    Gdiplus::Graphics g(mem);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+    // Track background (#181820 / RGB 24, 24, 32)
+    Gdiplus::SolidBrush trackBrush(Gdiplus::Color(255, 24, 24, 32));
+    Gdiplus::Pen trackPen(Gdiplus::Color(255, 34, 34, 44), 1.0f);
+    fillRoundRect(g, (float)x0, (float)y, (float)totalW, (float)ph, 8.0f, trackBrush, &trackPen);
+
     for (int i = 0; i < count; i++) {
       int px0 = x0 + i * (pw + gap);
       int px1 = px0 + pw;
@@ -890,13 +954,14 @@ void MainWindowWin32::OnPaint(HDC hdc) {
       rects[i][1] = y + ph;
       rects[i][2] = px0;
       rects[i][3] = px1;
+
       if (i == active) {
-        HBRUSH b = CreateSolidBrush(RGB(139, 38, 42));
-        HGDIOBJ old = SelectObject(mem, b);
-        RoundRect(mem, px0, y, px1, y + ph, 8, 8);
-        SelectObject(mem, old);
-        DeleteObject(b);
+        Gdiplus::SolidBrush activeBrush(Gdiplus::Color(255, 139, 38, 42));
+        Gdiplus::Pen activePen(Gdiplus::Color(255, 180, 52, 58), 1.0f);
+        fillRoundRect(g, (float)px0 + 1.0f, (float)y + 1.0f, (float)pw - 2.0f, (float)ph - 2.0f,
+                      6.0f, activeBrush, &activePen);
       }
+
       SetTextColor(mem, i == active ? RGB(255, 255, 255) : RGB(154, 154, 162));
       SelectObject(mem, m_normFont);
       RECT pr = { px0, y, px1, y + ph };
@@ -905,7 +970,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     }
   };
 
-  // Modern Toggle Switch
+  // Modern Toggle Switch (Anti-Aliased via GDI+)
   auto toggleSwitch = [&](int y, const wchar_t *label, bool on, int slot) {
     int swW = 34, swH = 18;
     int swX = w - kCardPad - 12 - swW;
@@ -917,23 +982,28 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     SelectObject(mem, m_normFont);
     DrawTextW(mem, label, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    // Switch track
-    RECT sr = { swX, swY, swX + swW, swY + swH };
-    HBRUSH tb = CreateSolidBrush(on ? RGB(139, 38, 42) : RGB(36, 36, 46));
-    HGDIOBJ oldTb = SelectObject(mem, tb);
-    RoundRect(mem, sr.left, sr.top, sr.right, sr.bottom, 18, 18);
-    SelectObject(mem, oldTb);
-    DeleteObject(tb);
+    Gdiplus::Graphics g(mem);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
 
-    // Switch circular thumb (14px diameter)
-    int thumbD = 14;
-    int thumbX = on ? (swX + swW - thumbD - 2) : (swX + 2);
-    int thumbY = swY + 2;
-    HBRUSH thb = CreateSolidBrush(RGB(255, 255, 255));
-    HGDIOBJ oldThb = SelectObject(mem, thb);
-    Ellipse(mem, thumbX, thumbY, thumbX + thumbD, thumbY + thumbD);
-    SelectObject(mem, oldThb);
-    DeleteObject(thb);
+    Gdiplus::GraphicsPath path;
+    float r = (float)swH;
+    float fx = (float)swX, fy = (float)swY, fw = (float)swW;
+    path.AddArc(fx, fy, r, r, 90.0f, 180.0f);
+    path.AddArc(fx + fw - r, fy, r, r, 270.0f, 180.0f);
+    path.CloseFigure();
+
+    Gdiplus::Color trackColor = on ? Gdiplus::Color(255, 139, 38, 42) : Gdiplus::Color(255, 34, 34, 44);
+    Gdiplus::SolidBrush trackBrush(trackColor);
+    g.FillPath(&trackBrush, &path);
+
+    Gdiplus::Pen trackPen(on ? Gdiplus::Color(255, 175, 48, 54) : Gdiplus::Color(255, 48, 48, 60), 1.0f);
+    g.DrawPath(&trackPen, &path);
+
+    float thumbD = (float)swH - 4.0f; // 14px
+    float thumbX = on ? (fx + fw - thumbD - 2.0f) : (fx + 2.0f);
+    float thumbY = fy + 2.0f;
+    Gdiplus::SolidBrush thumbBrush(Gdiplus::Color(255, 255, 255, 255));
+    g.FillEllipse(&thumbBrush, thumbX, thumbY, thumbD, thumbD);
 
     // Hit box (entire row)
     m_chk[slot][0] = y;
@@ -974,6 +1044,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   int diskCount = (int)std::min<size_t>(drives.size(), 3);
 
   // === Card 1: Telemetry ===
+  int card1y = y;
   int telemetryH = 26 + 28 + 28 + 28 + 34 + diskCount * 28 + 8;
   cardBg(y, telemetryH);
   cardTitle(y, L"Telemetry");
@@ -1034,10 +1105,9 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     DrawTextW(mem, tbuf, -1, &vr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     y += kRowH + 6;
   }
-  y += 8;
 
   // === Card 2: Power & Fan ===
-  y += 4;
+  y = card1y + telemetryH + 4;
   int card2y = y;
   cardBg(y, 204); // 4 pill rows; GPU Power row has a hover tooltip
   y += 4;
@@ -1050,9 +1120,13 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     DrawTextW(mem, L"Power Modes", -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
   }
   y += 18;
-  static const wchar_t *powerLabels[] = {L"Eco", L"Balanced", L"Perf"};
-  pillRow(y, 3, powerLabels, hal.GetPowerMode(), m_powerPill, kCardPad + 10,
+  static const wchar_t *powerLabels[] = {L"Eco", L"Balanced", L"Perf", L"Turbo"};
+  pillRow(y, 4, powerLabels, hal.GetPowerMode(), m_powerPill, kCardPad + 10,
           w - kCardPad - 10);
+  m_powerHoverRect[0] = y - 18;
+  m_powerHoverRect[1] = y + 28;
+  m_powerHoverRect[2] = kCardPad + 10;
+  m_powerHoverRect[3] = w - kCardPad - 10;
   y += 30;
 
   // Fan Profiles label + pills.
@@ -1068,6 +1142,10 @@ void MainWindowWin32::OnPaint(HDC hdc) {
                    ? 0
                    : 1 + (int)FanService::Get().GetProfile();
   pillRow(y, 4, fanLabels, fanIdx, m_fanPill, kCardPad + 10, w - kCardPad - 10);
+  m_fanHoverRect[0] = y - 18;
+  m_fanHoverRect[1] = y + 28;
+  m_fanHoverRect[2] = kCardPad + 10;
+  m_fanHoverRect[3] = w - kCardPad - 10;
   y += 30;
 
   // GPU MUX label + pills.
@@ -1083,7 +1161,7 @@ void MainWindowWin32::OnPaint(HDC hdc) {
           w - kCardPad - 10);
   y += 30;
 
-  // GPU Power (TGP) label + pills: Auto | Min | Med | Max.
+  // GPU Power (TGP) label + pills: None | TGP | +Boost.
   {
     RECT sr = { kCardPad + 12, y, w - kCardPad - 12, y + 16 };
     SetTextColor(mem, RGB(235, 235, 240));
@@ -1092,10 +1170,11 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   }
   y += 18;
   {
-    static const wchar_t *gpLabels[] = {L"Auto", L"None", L"TGP", L"+Boost"};
-    int ov = PowerControl::Get().GetGpuPowerOverride();
-    int gpIdx = (ov >= 0 && ov <= 2) ? ov + 1 : 0;
-    pillRow(y, 4, gpLabels, gpIdx, m_gpPill, kCardPad + 10,
+    static const wchar_t *gpLabels[] = {L"None", L"TGP", L"+Boost"};
+    int gpIdx = PowerControl::Get().GetEffectiveGpuPowerLevel();
+    if (gpIdx < 0) gpIdx = 0;
+    if (gpIdx > 2) gpIdx = 2;
+    pillRow(y, 3, gpLabels, gpIdx, m_gpPill, kCardPad + 10,
             w - kCardPad - 10);
     // Hover-hint hit area covers label + pills.
     m_gpHoverRect[0] = y - 18;
@@ -1103,13 +1182,11 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     m_gpHoverRect[2] = kCardPad + 10;
     m_gpHoverRect[3] = w - kCardPad - 10;
   }
-  y = card2y + 204; // jump past the card background
-  y += 4;
 
   // === Card 3: AMD PBO ===
-  y += 4;
+  y = card2y + 204 + 4;
   int card3y = y;
-  cardBg(y, 22 + 24 + 20 + 48);
+  cardBg(y, 118);
   cardTitle(y, L"AMD PBO");
   y += 24;
   int co = hal.GetCachedAmdCurveOptimizer();
@@ -1123,12 +1200,13 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   m_btnCoMinus[2] = kCardPad + 12;
   m_btnCoMinus[3] = kCardPad + 12 + 22;
   {
+    Gdiplus::Graphics g(mem);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::SolidBrush btnBrush(Gdiplus::Color(255, 28, 28, 38));
+    Gdiplus::Pen btnPen(Gdiplus::Color(255, 48, 48, 60), 1.0f);
+    fillRoundRect(g, (float)m_btnCoMinus[2], (float)m_btnCoMinus[0], 22.0f, 20.0f, 5.0f, btnBrush, &btnPen);
+
     RECT bmr = { m_btnCoMinus[2], m_btnCoMinus[0], m_btnCoMinus[3], m_btnCoMinus[1] };
-    HBRUSH bb = CreateSolidBrush(RGB(28, 28, 38));
-    HGDIOBJ oldBb = SelectObject(mem, bb);
-    RoundRect(mem, bmr.left, bmr.top, bmr.right, bmr.bottom, 6, 6);
-    SelectObject(mem, oldBb);
-    DeleteObject(bb);
     SetTextColor(mem, RGB(240, 240, 245));
     SelectObject(mem, m_boldFont);
     DrawTextW(mem, L"-", -1, &bmr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -1140,12 +1218,13 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   m_btnCoPlus[2] = w - kCardPad - 12 - 22;
   m_btnCoPlus[3] = w - kCardPad - 12;
   {
+    Gdiplus::Graphics g(mem);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::SolidBrush btnBrush(Gdiplus::Color(255, 28, 28, 38));
+    Gdiplus::Pen btnPen(Gdiplus::Color(255, 48, 48, 60), 1.0f);
+    fillRoundRect(g, (float)m_btnCoPlus[2], (float)m_btnCoPlus[0], 22.0f, 20.0f, 5.0f, btnBrush, &btnPen);
+
     RECT bpr = { m_btnCoPlus[2], m_btnCoPlus[0], m_btnCoPlus[3], m_btnCoPlus[1] };
-    HBRUSH bb = CreateSolidBrush(RGB(28, 28, 38));
-    HGDIOBJ oldBb = SelectObject(mem, bb);
-    RoundRect(mem, bpr.left, bpr.top, bpr.right, bpr.bottom, 6, 6);
-    SelectObject(mem, oldBb);
-    DeleteObject(bb);
     SetTextColor(mem, RGB(240, 240, 245));
     SelectObject(mem, m_boldFont);
     DrawTextW(mem, L"+", -1, &bpr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -1156,37 +1235,35 @@ void MainWindowWin32::OnPaint(HDC hdc) {
   m_coTrackX1 = w - kCardPad - 42;
   m_coTrackY = y + 10;
   {
-    // Track
-    RECT tr = { m_coTrackX0, m_coTrackY - 2, m_coTrackX1, m_coTrackY + 2 };
-    HBRUSH b = CreateSolidBrush(RGB(28, 28, 36));
-    HGDIOBJ oldB = SelectObject(mem, b);
-    RoundRect(mem, tr.left, tr.top, tr.right, tr.bottom, 4, 4);
-    SelectObject(mem, oldB);
-    DeleteObject(b);
+    float tx = (float)m_coTrackX0;
+    float ty = (float)(m_coTrackY - 2);
+    float tw = (float)(m_coTrackX1 - m_coTrackX0);
+    float th = 4.0f;
 
-    int fillW = (int)((float)(m_coTrackX1 - m_coTrackX0) * (float)(co + 30) /
-                      30.0f);
-    RECT fr = { m_coTrackX0, m_coTrackY - 2, m_coTrackX0 + fillW,
-                m_coTrackY + 2 };
-    HBRUSH fb = CreateSolidBrush(RGB(139, 38, 42));
-    HGDIOBJ oldFb = SelectObject(mem, fb);
-    RoundRect(mem, fr.left, fr.top, std::max(fr.left + 4, fr.right), fr.bottom, 4, 4);
-    SelectObject(mem, oldFb);
-    DeleteObject(fb);
+    Gdiplus::Graphics g(mem);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+    Gdiplus::SolidBrush trackBrush(Gdiplus::Color(255, 28, 28, 36));
+    fillRoundRect(g, tx, ty, tw, th, 2.0f, trackBrush);
+
+    float fillW = tw * (float)(co + 30) / 30.0f;
+    if (fillW > 2.0f) {
+      Gdiplus::SolidBrush fillBrush(Gdiplus::Color(255, 139, 38, 42));
+      fillRoundRect(g, tx, ty, fillW, th, 2.0f, fillBrush);
+    }
 
     // 14px circular thumb handle
-    int hx = m_coTrackX0 + fillW;
-    HBRUSH ring = CreateSolidBrush(RGB(18, 18, 24));
-    HGDIOBJ oldRing = SelectObject(mem, ring);
-    Ellipse(mem, hx - 7, m_coTrackY - 7, hx + 7, m_coTrackY + 7);
-    SelectObject(mem, oldRing);
-    DeleteObject(ring);
+    float hx = tx + fillW;
+    float cy = (float)m_coTrackY;
 
-    HBRUSH hb = CreateSolidBrush(RGB(139, 38, 42));
-    HGDIOBJ oldHb = SelectObject(mem, hb);
-    Ellipse(mem, hx - 4, m_coTrackY - 4, hx + 4, m_coTrackY + 4);
-    SelectObject(mem, oldHb);
-    DeleteObject(hb);
+    Gdiplus::SolidBrush ringBrush(Gdiplus::Color(255, 18, 18, 24));
+    g.FillEllipse(&ringBrush, hx - 7.0f, cy - 7.0f, 14.0f, 14.0f);
+
+    Gdiplus::SolidBrush hbBrush(Gdiplus::Color(255, 139, 38, 42));
+    g.FillEllipse(&hbBrush, hx - 4.0f, cy - 4.0f, 8.0f, 8.0f);
+
+    Gdiplus::Pen knobPen(Gdiplus::Color(255, 200, 60, 66), 1.0f);
+    g.DrawEllipse(&knobPen, hx - 4.0f, cy - 4.0f, 8.0f, 8.0f);
   }
   y += 22;
   {
@@ -1215,13 +1292,13 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     pillRow(y, 4, tctlLabels, tctlIdx, m_tctlPill, kCardPad + 12,
             w - kCardPad - 12);
   }
-  y += 30;
 
   // === Card 4: System (collapsible) ===
-  y += 4;
+  y = card3y + 118 + 4;
   int card4y = y;
   bool sysExpanded = m_systemExpanded;
-  cardBg(y, sysExpanded ? 346 : 32);
+  cardBg(y, sysExpanded ? 404 : 32);
+
   // Clickable title row with chevron.
   m_sysTitle[0] = y;
   m_sysTitle[1] = y + 26;
@@ -1236,166 +1313,228 @@ void MainWindowWin32::OnPaint(HDC hdc) {
               DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
   }
   y += 26;
+
   if (!sysExpanded) {
     // Invalidate all toggle hit-rects while collapsed.
-    for (int i = 0; i < 9; i++) {
+    for (int i = 0; i < 11; i++) {
       m_chk[i][0] = m_chk[i][1] = 0;
     }
+    m_btnFlush[0] = m_btnFlush[1] = 0;
+    m_requiredClientH = card4y + 32 + 12;
   } else {
-  toggleSwitch(y, L"80% Battery Care Mode",
-               OmenHal::Get().GetBatteryChargeLimit() <= 80, 0);
-  y += kRowH + 4;
-  toggleSwitch(y, L"Auto Startup", AutoStart(), 1);
-  y += kRowH + 4;
-  toggleSwitch(y, L"Close to tray",
-               FanService::Get().GetOverlayConfig().minimizeOnClose, 2);
-  y += kRowH + 4;
-  toggleSwitch(y, L"API Server", FanService::Get().GetOverlayConfig().apiEnabled, 5);
-  y += kRowH + 4;
-  toggleSwitch(y, L"Wake on LAN", PowerControl::Get().GetWakeOnLan(), 6);
-  y += kRowH + 4;
-  toggleSwitch(y, L"Auto Power Switch",
-               FanService::Get().GetOverlayConfig().autoPowerSwitch, 7);
-  y += kRowH + 4;
-  toggleSwitch(y, L"Game Auto-Profile",
-               FanService::Get().GetOverlayConfig().gameAutoProfile, 8);
-  y += kRowH + 4;
+    auto sectionHeader = [&](const wchar_t *title) {
+      RECT hr = { kCardPad + 12, y + 2, w - kCardPad - 12, y + 16 };
+      SetTextColor(mem, RGB(140, 140, 158));
+      SelectObject(mem, m_smallFont);
+      DrawTextW(mem, title, -1, &hr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+      y += 18;
+    };
 
-  // Show HUD + HUD Passive — full-width rows (side-by-side halves were too
-  // narrow for the 34px switches and collided).
-  toggleSwitch(y, L"Show HUD", FanService::Get().GetOverlayConfig().show, 3);
-  y += kRowH + 4;
-  toggleSwitch(y, L"HUD Passive",
-               FanService::Get().GetOverlayConfig().hudPassthrough, 4);
-  y += kRowH + 4;
+    auto singleRowSwitch = [&](const wchar_t *label, bool on, int slot) {
+      int swW = 32, swH = 16;
+      int x0 = kCardPad + 12;
+      int x1 = w - kCardPad - 12;
+      int swX = x1 - swW;
+      int swY = y + (24 - swH) / 2;
 
-  // Opacity slider.
-  {
-    RECT tr = { kCardPad + 12, y, w - kCardPad - 12, y + kRowH };
-    std::swprintf(buf, sizeof(buf), L"HUD Visibility: %d%%",
-                  (int)(FanService::Get().GetOverlayConfig().opacity * 100.0f));
-    SetTextColor(mem, RGB(235, 235, 240));
-    SelectObject(mem, m_normFont);
-    DrawTextW(mem, buf, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+      RECT tr = { x0, y, swX - 8, y + 24 };
+      SetTextColor(mem, RGB(235, 235, 240));
+      SelectObject(mem, m_normFont);
+      DrawTextW(mem, label, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+      Gdiplus::Graphics g(mem);
+      g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+      // Smooth capsule track
+      Gdiplus::GraphicsPath path;
+      float r = (float)swH;
+      float fx = (float)swX, fy = (float)swY, fw = (float)swW;
+      path.AddArc(fx, fy, r, r, 90.0f, 180.0f);
+      path.AddArc(fx + fw - r, fy, r, r, 270.0f, 180.0f);
+      path.CloseFigure();
+
+      Gdiplus::Color trackColor = on ? Gdiplus::Color(255, 139, 38, 42) : Gdiplus::Color(255, 34, 34, 44);
+      Gdiplus::SolidBrush trackBrush(trackColor);
+      g.FillPath(&trackBrush, &path);
+
+      Gdiplus::Pen trackPen(on ? Gdiplus::Color(255, 175, 48, 54) : Gdiplus::Color(255, 48, 48, 60), 1.0f);
+      g.DrawPath(&trackPen, &path);
+
+      // Smooth circular thumb
+      float thumbD = (float)swH - 4.0f; // 12px
+      float thumbX = on ? (fx + fw - thumbD - 2.0f) : (fx + 2.0f);
+      float thumbY = fy + 2.0f;
+      Gdiplus::SolidBrush thumbBrush(Gdiplus::Color(255, 255, 255, 255));
+      g.FillEllipse(&thumbBrush, thumbX, thumbY, thumbD, thumbD);
+
+      m_chk[slot][0] = y;
+      m_chk[slot][1] = y + 24;
+      m_chk[slot][2] = x0;
+      m_chk[slot][3] = x1;
+
+      y += 24;
+    };
+
+    // --- Hardware & Power Section ---
+    sectionHeader(L"HARDWARE & POWER");
+    singleRowSwitch(L"80% Battery Charge Limit", OmenHal::Get().GetBatteryChargeLimit() <= 80, 0);
+    singleRowSwitch(L"Display Panel Overdrive", OmenHal::Get().GetDisplayOverdrive(), 9);
+    singleRowSwitch(L"Wake on LAN (Ethernet S4/S5)", PowerControl::Get().GetWakeOnLan(), 6);
+    singleRowSwitch(L"Wake on WLAN & Bluetooth", PowerControl::Get().GetWakeOnWlanBt(), 10);
+    singleRowSwitch(L"Auto Power on AC / Battery", FanService::Get().GetOverlayConfig().autoPowerSwitch, 7);
+
+    y += 4;
+
+    // --- Application & Overlay Section ---
+    sectionHeader(L"APPLICATION & HUD");
+    singleRowSwitch(L"Start with Windows", AutoStart(), 1);
+    singleRowSwitch(L"Minimize to System Tray", FanService::Get().GetOverlayConfig().minimizeOnClose, 2);
+    singleRowSwitch(L"Fullscreen Game Profile", FanService::Get().GetOverlayConfig().gameAutoProfile, 8);
+    singleRowSwitch(L"Performance HUD Overlay", FanService::Get().GetOverlayConfig().show, 3);
+    singleRowSwitch(L"HUD Click Passthrough", FanService::Get().GetOverlayConfig().hudPassthrough, 4);
+    singleRowSwitch(L"Local REST API Server", FanService::Get().GetOverlayConfig().apiEnabled, 5);
+
+    y += 6;
+
+    // Opacity slider
+    {
+      RECT tr = { kCardPad + 12, y, w - kCardPad - 12, y + 16 };
+      std::swprintf(buf, sizeof(buf), L"HUD Visibility: %d%%",
+                    (int)(FanService::Get().GetOverlayConfig().opacity * 100.0f));
+      SetTextColor(mem, RGB(235, 235, 240));
+      SelectObject(mem, m_normFont);
+      DrawTextW(mem, buf, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+    y += 14;
+    m_opacityTrackX0 = kCardPad + 12;
+    m_opacityTrackX1 = w - kCardPad - 12;
+    m_opacityTrackY = y + 6;
+    {
+      int op = (int)(FanService::Get().GetOverlayConfig().opacity * 100.0f);
+      RECT tr = { m_opacityTrackX0, m_opacityTrackY - 2, m_opacityTrackX1,
+                  m_opacityTrackY + 2 };
+      HBRUSH b = CreateSolidBrush(RGB(28, 28, 36));
+      HGDIOBJ oldB = SelectObject(mem, b);
+      RoundRect(mem, tr.left, tr.top, tr.right, tr.bottom, 4, 4);
+      SelectObject(mem, oldB);
+      DeleteObject(b);
+
+      int fillW = (int)((float)(m_opacityTrackX1 - m_opacityTrackX0) *
+                        (float)(op - 10) / 90.0f);
+      RECT fr = { m_opacityTrackX0, m_opacityTrackY - 2, m_opacityTrackX0 + fillW,
+                  m_opacityTrackY + 2 };
+      HBRUSH fb = CreateSolidBrush(RGB(139, 38, 42));
+      HGDIOBJ oldFb = SelectObject(mem, fb);
+      RoundRect(mem, fr.left, fr.top, std::max(fr.left + 4, fr.right), fr.bottom, 4, 4);
+      
+      float hx = (float)(m_opacityTrackX0 + fillW);
+      float cy = (float)m_opacityTrackY;
+      Gdiplus::Graphics g(mem);
+      g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+      Gdiplus::SolidBrush ringBrush(Gdiplus::Color(255, 18, 18, 24));
+      g.FillEllipse(&ringBrush, hx - 6.0f, cy - 6.0f, 12.0f, 12.0f);
+
+      Gdiplus::SolidBrush hbBrush(Gdiplus::Color(255, 139, 38, 42));
+      g.FillEllipse(&hbBrush, hx - 3.0f, cy - 3.0f, 6.0f, 6.0f);
+      
+      SelectObject(mem, oldFb);
+      DeleteObject(fb);
+    }
+    y += 14;
+
+    // Flush button with feedback animation
+    m_btnFlush[0] = y;
+    m_btnFlush[1] = y + 26;
+    m_btnFlush[2] = kCardPad + 10;
+    m_btnFlush[3] = w - kCardPad - 10;
+    {
+      float bx = (float)m_btnFlush[2];
+      float by = (float)m_btnFlush[0];
+      float bw = (float)(m_btnFlush[3] - m_btnFlush[2]);
+      float bh = (float)(m_btnFlush[1] - m_btnFlush[0]);
+
+      bool isFlushed = (m_flushFeedbackTicks > 0);
+      Gdiplus::Color btnBg = isFlushed ? Gdiplus::Color(255, 20, 52, 36) : Gdiplus::Color(255, 28, 28, 38);
+      Gdiplus::Color btnBorder = isFlushed ? Gdiplus::Color(255, 50, 240, 180) : Gdiplus::Color(255, 52, 52, 66);
+      COLORREF btnTxt = isFlushed ? RGB(50, 240, 180) : RGB(235, 235, 240);
+
+      Gdiplus::Graphics g(mem);
+      g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+      Gdiplus::SolidBrush btnBrush(btnBg);
+      Gdiplus::Pen btnPen(btnBorder, 1.0f);
+      fillRoundRect(g, bx, by, bw, bh, 6.0f, btnBrush, &btnPen);
+
+      RECT br = { m_btnFlush[2], m_btnFlush[0], m_btnFlush[3], m_btnFlush[1] };
+      SetTextColor(mem, btnTxt);
+      SelectObject(mem, m_normFont);
+      DrawTextW(mem, isFlushed ? L"\u2713 Flushed RAM Cache" : L"Flush RAM Cache",
+                -1, &br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    m_requiredClientH = m_btnFlush[1] + 16;
   }
-  y += kRowH - 4;
-  m_opacityTrackX0 = kCardPad + 12;
-  m_opacityTrackX1 = w - kCardPad - 12;
-  m_opacityTrackY = y + 8;
-  {
-    int op = (int)(FanService::Get().GetOverlayConfig().opacity * 100.0f);
-    RECT tr = { m_opacityTrackX0, m_opacityTrackY - 2, m_opacityTrackX1,
-                m_opacityTrackY + 2 };
-    HBRUSH b = CreateSolidBrush(RGB(28, 28, 36));
-    HGDIOBJ oldB = SelectObject(mem, b);
-    RoundRect(mem, tr.left, tr.top, tr.right, tr.bottom, 4, 4);
-    SelectObject(mem, oldB);
-    DeleteObject(b);
-
-    int fillW = (int)((float)(m_opacityTrackX1 - m_opacityTrackX0) *
-                      (float)(op - 10) / 90.0f);
-    RECT fr = { m_opacityTrackX0, m_opacityTrackY - 2, m_opacityTrackX0 + fillW,
-                m_opacityTrackY + 2 };
-    HBRUSH fb = CreateSolidBrush(RGB(139, 38, 42));
-    HGDIOBJ oldFb = SelectObject(mem, fb);
-    RoundRect(mem, fr.left, fr.top, std::max(fr.left + 4, fr.right), fr.bottom, 4, 4);
-    SelectObject(mem, oldFb);
-    DeleteObject(fb);
-
-    int hx = m_opacityTrackX0 + fillW;
-    HBRUSH ring = CreateSolidBrush(RGB(18, 18, 24));
-    HGDIOBJ oldRing = SelectObject(mem, ring);
-    Ellipse(mem, hx - 7, m_opacityTrackY - 7, hx + 7, m_opacityTrackY + 7);
-    SelectObject(mem, oldRing);
-    DeleteObject(ring);
-
-    HBRUSH hb = CreateSolidBrush(RGB(139, 38, 42));
-    HGDIOBJ oldHb = SelectObject(mem, hb);
-    Ellipse(mem, hx - 4, m_opacityTrackY - 4, hx + 4, m_opacityTrackY + 4);
-    SelectObject(mem, oldHb);
-    DeleteObject(hb);
-  }
-  y += 20;
-
-  // Flush button with feedback animation
-  m_btnFlush[0] = y;
-  m_btnFlush[1] = y + 28;
-  m_btnFlush[2] = kCardPad + 10;
-  m_btnFlush[3] = w - kCardPad - 10;
-  {
-    RECT br = { m_btnFlush[2], m_btnFlush[0], m_btnFlush[3],
-                m_btnFlush[1] };
-    bool isFlushed = (m_flushFeedbackTicks > 0);
-    COLORREF btnBg = isFlushed ? RGB(20, 52, 36) : RGB(28, 28, 38);
-    COLORREF btnBorder = isFlushed ? RGB(50, 240, 180) : RGB(52, 52, 66);
-    COLORREF btnTxt = isFlushed ? RGB(50, 240, 180) : RGB(235, 235, 240);
-
-    HBRUSH b = CreateSolidBrush(btnBg);
-    HBRUSH old = (HBRUSH)SelectObject(mem, b);
-    RoundRect(mem, br.left, br.top, br.right, br.bottom, 8, 8);
-    SelectObject(mem, old);
-    DeleteObject(b);
-
-    SetTextColor(mem, btnTxt);
-    SelectObject(mem, m_normFont);
-    DrawTextW(mem, isFlushed ? L"\u2713 Flushed RAM Cache" : L"Flush RAM Cache",
-              -1, &br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    HBRUSH nb = (HBRUSH)GetStockObject(NULL_BRUSH);
-    HGDIOBJ oldN = SelectObject(mem, nb);
-    HPEN p = CreatePen(PS_SOLID, 1, btnBorder);
-    HGDIOBJ oldP = SelectObject(mem, p);
-    RoundRect(mem, br.left, br.top, br.right, br.bottom, 8, 8);
-    SelectObject(mem, oldP);
-    DeleteObject(p);
-    SelectObject(mem, oldN);
-  }
-  } // end expanded System card
 
   (void)card2y;
   (void)card3y;
   (void)card4y;
 
-  // Collapsed card: m_btnFlush is stale (button not drawn) — use card bottom.
-  if (m_systemExpanded)
-    m_requiredClientH = m_btnFlush[1] + 10; // button bottom + margin
-  else
-    m_requiredClientH = card4y + 32 + 10;   // collapsed card bottom + margin
+  // Hover hint panels — drawn last so they float on top.
+  auto drawHintBox = [&](int rect[4], const wchar_t *title, const wchar_t *lines[], int count) {
+    if (rect[1] <= rect[0]) return;
+    int bx0 = rect[2];
+    int bx1 = rect[3];
+    int boxH = (count + 1) * 16 + 12;
+    int by0 = rect[1] + 6;
+    if (by0 + boxH > h - 10) by0 = rect[0] - boxH - 6;
+    int by1 = by0 + boxH;
 
-  // GPU Power hover hint — floating panel drawn last so it sits on top.
-  if (m_hoverGp && m_gpHoverRect[1] > m_gpHoverRect[0]) {
-    int bx0 = m_gpHoverRect[2];
-    int bx1 = m_gpHoverRect[3];
-    int by0 = m_gpHoverRect[1] + 6;
-    int by1 = by0 + 5 * 16 + 12;
-    HBRUSH b = CreateSolidBrush(RGB(24, 24, 32));
-    HGDIOBJ oldB = SelectObject(mem, b);
-    RoundRect(mem, bx0, by0, bx1, by1, 8, 8);
-    SelectObject(mem, oldB);
-    DeleteObject(b);
-    HBRUSH nb = (HBRUSH)GetStockObject(NULL_BRUSH);
-    HPEN p = CreatePen(PS_SOLID, 1, RGB(60, 60, 74));
-    HGDIOBJ oldN = SelectObject(mem, nb);
-    HGDIOBJ oldP = SelectObject(mem, p);
-    RoundRect(mem, bx0, by0, bx1, by1, 8, 8);
-    SelectObject(mem, oldP);
-    SelectObject(mem, oldN);
-    DeleteObject(p);
+    float fx = (float)bx0, fy = (float)by0, fw = (float)(bx1 - bx0), fh = (float)boxH;
 
-    const wchar_t *lines[] = {
-        L"GPU Power override",
-        L"Auto: follow the Power Mode table",
-        L"None: no TGP limit",
-        L"TGP: custom GPU power cap",
-        L"+Boost: TGP + NVIDIA Dynamic Boost"};
+    Gdiplus::Graphics g(mem);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+    Gdiplus::SolidBrush boxBrush(Gdiplus::Color(245, 22, 22, 30));
+    Gdiplus::Pen boxPen(Gdiplus::Color(255, 60, 60, 74), 1.0f);
+    fillRoundRect(g, fx, fy, fw, fh, 8.0f, boxBrush, &boxPen);
+
     int ly = by0 + 7;
-    for (int i = 0; i < 5; i++) {
+    RECT tr = {bx0 + 12, ly, bx1 - 12, ly + 16};
+    SetTextColor(mem, RGB(240, 240, 245));
+    SelectObject(mem, m_normFont);
+    DrawTextW(mem, title, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    ly += 16;
+
+    SelectObject(mem, m_smallFont);
+    SetTextColor(mem, RGB(180, 180, 190));
+    for (int i = 0; i < count; i++) {
       RECT lr = {bx0 + 12, ly, bx1 - 12, ly + 16};
-      SetTextColor(mem, i == 0 ? RGB(240, 240, 245) : RGB(180, 180, 190));
-      SelectObject(mem, i == 0 ? m_normFont : m_smallFont);
       DrawTextW(mem, lines[i], -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
       ly += 16;
     }
+  };
+
+  if (m_hoverPower && m_powerHoverRect[1] > m_powerHoverRect[0]) {
+    const wchar_t *lines[] = {
+        L"Eco: 25W CPU / Base GPU (Quiet battery)",
+        L"Balanced: 45W CPU / Standard TGP (Daily)",
+        L"Perf: 75W CPU / Full TGP + Boost (Gaming)",
+        L"Turbo: Uncapped CPU (120W) / Max GPU Boost"};
+    drawHintBox(m_powerHoverRect, L"Power Modes (CPU/GPU limits)", lines, 4);
+  } else if (m_hoverFan && m_fanHoverRect[1] > m_fanHoverRect[0]) {
+    const wchar_t *lines[] = {
+        L"BIOS: Factory internal ACPI fan tables",
+        L"Default: Quiet idle, progressive curve",
+        L"Quiet: Low acoustics (fans <=50% to 80\u00B0C)",
+        L"Cool: Max cooling (100% boost at >=75\u00B0C)"};
+    drawHintBox(m_fanHoverRect, L"Fan Profiles (Curves & Speeds)", lines, 4);
+  } else if (m_hoverGp && m_gpHoverRect[1] > m_gpHoverRect[0]) {
+    const wchar_t *lines[] = {
+        L"None: Base TGP limit (no boost)",
+        L"TGP: Standard GPU power cap",
+        L"+Boost: TGP + NVIDIA Dynamic Boost"};
+    drawHintBox(m_gpHoverRect, L"GPU Power", lines, 3);
   }
 
   // Present
