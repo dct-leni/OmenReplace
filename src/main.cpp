@@ -29,8 +29,9 @@ static bool IsUserAdmin() {
 
 static LONG WINAPI GlobalCrashHandler(EXCEPTION_POINTERS *pExceptionInfo) {
   (void)pExceptionInfo;
-  OmenLog("[AMDOMEN] Crash detected! Restoring BIOS fan control immediately...\n");
+  OmenLog("[AMDOMEN] Crash detected! Restoring BIOS fan control and timer pairing immediately...\n");
   FanController::Get().RestoreBios();
+  OmenHal::Get().Shutdown();
   return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -82,8 +83,6 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showMode) {
     }
   }
 
-  timeBeginPeriod(1);
-
   if (!OmenHal::Get().Initialize())
     OmenLog("[AMDOMEN] HAL initialization failed\n");
 
@@ -132,7 +131,6 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showMode) {
   ApiServer::Get().Stop();
   tray.Stop();
   OmenHal::Get().Shutdown();
-  timeEndPeriod(1);
   OmenLog("[AMDOMEN] app exit\n");
   ExitProcess(0);
   return 0;

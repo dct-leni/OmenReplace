@@ -19,8 +19,7 @@ enum class GameCompactionState {
   InQueue = 2,
   Compacting = 3,
   Decompacting = 4,
-  Completed = 5,
-  Failed = 6,
+  Failed = 5,
 };
 
 enum class CompressibilityRating {
@@ -56,13 +55,13 @@ public:
     ScanningSteam,
     ScanningEpic,
     ScanningHydra,
+    ScanningCustom,
     MeasuringSizes,
     Complete,
   };
 
   void StartScan(bool force = false);
   bool IsScanning() const { return m_isScanning.load(); }
-  ScanStage GetScanStage() const { return m_scanStage.load(); }
   std::wstring GetScanStatusText() const;
 
   std::vector<GameEntry> GetGames();
@@ -71,6 +70,8 @@ public:
   void StartDecompact(size_t index);
   void StartCompactAll(CompactAlgo algo = CompactAlgo::LZX);
   void CancelOperation();
+
+  bool AddCustomFolder(const std::wstring &folderPath);
 
   CompactAlgo GetSelectedAlgo() const { return m_algo; }
   void SetSelectedAlgo(CompactAlgo algo) { m_algo = algo; }
@@ -93,6 +94,7 @@ private:
   void ScanSteam(std::vector<GameEntry> &games);
   void ScanEpic(std::vector<GameEntry> &games);
   void ScanHydra(std::vector<GameEntry> &games);
+  void ScanCustom(std::vector<GameEntry> &games);
   void MeasureDirectorySizesFast(GameEntry &entry);
   void AnalyzeGameWorthiness(GameEntry &entry);
 

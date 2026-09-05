@@ -24,30 +24,6 @@ struct NVME_HEALTH_LOG {
     UCHAR   Other[506];          // offset 6..511 → total 512 bytes
 };
 #pragma pack(pop)
-
-struct MY_STORAGE_PROTOCOL_DATA_DESCRIPTOR {
-    DWORD Version;
-    DWORD Size;
-    STORAGE_PROTOCOL_TYPE ProtocolType;
-    DWORD ProtocolDataOffset;
-    DWORD ProtocolDataLength;
-    DWORD FixedProtocolReturnData;
-    DWORD Reserved[3];
-};
-
-struct MY_STORAGE_PROTOCOL_SPECIFIC_DATA {
-    STORAGE_PROTOCOL_TYPE ProtocolType;
-    DWORD DataType;
-    DWORD ProtocolDataRequestValue;
-    DWORD ProtocolDataRequestSubValue;
-    DWORD ProtocolDataOffset;
-    DWORD ProtocolDataLength;
-    DWORD FixedProtocolReturnData;
-    DWORD Reserved[3];
-};
-
-#pragma pack(pop)
-
 SmartHelper::SmartHelper() {}
 SmartHelper::~SmartHelper() {}
 

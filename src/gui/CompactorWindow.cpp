@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <dwmapi.h>
 #include <gdiplus.h>
+#include <shobjidl.h>
 #include <windowsx.h>
 
 #pragma comment(lib, "gdiplus.lib")
@@ -115,14 +116,12 @@ void CompactorWindow::Show(HWND hParent) {
   ShowWindow(m_hwnd, SW_SHOW);
   SetForegroundWindow(m_hwnd);
 
-  if (!m_timerId) {
-    m_timerId = SetTimer(m_hwnd, 101, 30, nullptr); // 30ms for smooth spinner animation
-  }
-
   // Auto-scan if empty
   if (CompactorService::Get().GetGames().empty() && !CompactorService::Get().IsScanning()) {
     CompactorService::Get().StartScan(true);
   }
+
+  UpdateTimerState();
 }
 
 void CompactorWindow::Hide() {
@@ -211,6 +210,52 @@ LRESULT CALLBACK CompactorWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
   return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+void CompactorWindow::UpdateTimerState() {
+  if (!m_hwnd) return;
+  bool isScanning = CompactorService::Get().IsScanning();
+  bool isBusy = CompactorService::Get().IsBusy();
+  if (isScanning || isBusy) {
+    if (!m_timerId) {
+      m_timerId = SetTimer(m_hwnd, 101, 40, nullptr); // 40ms = 25 FPS, smooth spinner & low overhead
+    }
+  } else {
+    if (m_timerId) {
+      KillTimer(m_hwnd, m_timerId);
+      m_timerId = 0;
+      InvalidateRect(m_hwnd, nullptr, FALSE);
+    }
+  }
+}
+
+void CompactorWindow::OnAddFolder() {
+  IFileOpenDialog *pfd = nullptr;
+  HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd));
+  if (SUCCEEDED(hr)) {
+    DWORD dwOptions = 0;
+    pfd->GetOptions(&dwOptions);
+    pfd->SetOptions(dwOptions | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+    pfd->SetTitle(L"Select Custom Game Folder");
+
+    if (SUCCEEDED(pfd->Show(m_hwnd))) {
+      IShellItem *psi = nullptr;
+      if (SUCCEEDED(pfd->GetResult(&psi))) {
+        PWSTR pszPath = nullptr;
+        if (SUCCEEDED(psi->GetDisplayName(SIGDN_FILESYSPATH, &pszPath))) {
+          std::wstring chosenPath(pszPath);
+          CoTaskMemFree(pszPath);
+
+          if (CompactorService::Get().AddCustomFolder(chosenPath)) {
+            UpdateTimerState();
+            InvalidateRect(m_hwnd, nullptr, FALSE);
+          }
+        }
+        psi->Release();
+      }
+    }
+    pfd->Release();
+  }
+}
+
 void CompactorWindow::OnTimer() {
   m_spinnerAngle += 6.0f;
   if (m_spinnerAngle >= 360.0f) m_spinnerAngle -= 360.0f;
@@ -218,6 +263,8 @@ void CompactorWindow::OnTimer() {
   if (m_hwnd) {
     InvalidateRect(m_hwnd, nullptr, FALSE);
   }
+
+  UpdateTimerState();
 }
 
 void CompactorWindow::OnMouseWheel(int delta) {
@@ -231,7 +278,8 @@ void CompactorWindow::OnMouseMove(int x, int y) {
   bool isHand = false;
   POINT pt = { x, y };
   if (PtInRect(&m_rcClose, pt) || PtInRect(&m_rcCompactAll, pt) ||
-      PtInRect(&m_rcRescan, pt) || PtInRect(&m_rcAlgoLzx, pt) || PtInRect(&m_rcAlgoXpress, pt)) {
+      PtInRect(&m_rcRescan, pt) || PtInRect(&m_rcAddFolder, pt) ||
+      PtInRect(&m_rcAlgoLzx, pt) || PtInRect(&m_rcAlgoXpress, pt)) {
     isHand = true;
   }
   for (const auto &ar : m_gameActionRects) {
@@ -253,8 +301,14 @@ void CompactorWindow::OnLButtonDown(int x, int y) {
 
   if (CompactorService::Get().IsScanning()) return;
 
+  if (PtInRect(&m_rcAddFolder, pt)) {
+    OnAddFolder();
+    return;
+  }
+
   if (PtInRect(&m_rcRescan, pt)) {
     CompactorService::Get().StartScan(true);
+    UpdateTimerState();
     return;
   }
 
@@ -276,6 +330,8 @@ void CompactorWindow::OnLButtonDown(int x, int y) {
     } else {
       CompactorService::Get().StartCompactAll(CompactorService::Get().GetSelectedAlgo());
     }
+    UpdateTimerState();
+    if (m_hwnd) InvalidateRect(m_hwnd, nullptr, FALSE);
     return;
   }
 
@@ -286,8 +342,24 @@ void CompactorWindow::OnLButtonDown(int x, int y) {
       } else if (ar.isDecompact) {
         CompactorService::Get().StartDecompact(ar.gameIndex);
       } else {
+        auto games = CompactorService::Get().GetGames();
+        if (ar.gameIndex < games.size() && games[ar.gameIndex].hasDirectStorage) {
+          int ret = MessageBoxW(
+              m_hwnd,
+              L"This game uses Microsoft DirectStorage for high-speed GPU streaming.\n\n"
+              L"Compacting it with NTFS/CompactOS will disable Windows BypassIO, "
+              L"which can cause loading stutters and reduced streaming performance.\n\n"
+              L"Are you sure you want to compact this game anyway?",
+              L"DirectStorage Warning - AMDOMEN",
+              MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+          if (ret != IDYES) {
+            return;
+          }
+        }
         CompactorService::Get().StartCompact(ar.gameIndex, CompactorService::Get().GetSelectedAlgo());
       }
+      UpdateTimerState();
+      if (m_hwnd) InvalidateRect(m_hwnd, nullptr, FALSE);
       return;
     }
   }
@@ -302,6 +374,7 @@ void CompactorWindow::OnPaint(HDC hdc) {
   HDC memDC = CreateCompatibleDC(hdc);
   HBITMAP memBmp = CreateCompatibleBitmap(hdc, w, h);
   HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
+  SetBkMode(memDC, TRANSPARENT);
 
   Gdiplus::Graphics gfx(memDC);
   gfx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
@@ -311,7 +384,7 @@ void CompactorWindow::OnPaint(HDC hdc) {
   Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 14, 14, 18));
   gfx.FillRectangle(&bgBrush, 0, 0, w, h);
 
-  // Fonts initialization matching MainWindowWin32 exactly
+  // Fonts initialization matching original clean geometry
   if (!m_titleFont) {
     m_titleFont = CreateFontW(16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -333,11 +406,10 @@ void CompactorWindow::OnPaint(HDC hdc) {
 
   // Top Title Bar
   {
-    RECT tr = { 16, 8, w - 50, 34 };
-    SetTextColor(memDC, RGB(240, 240, 245));
-    SetBkMode(memDC, TRANSPARENT);
+    RECT tr = { 16, 12, w - 50, 36 };
+    SetTextColor(memDC, RGB(255, 255, 255));
     SelectObject(memDC, m_titleFont);
-    DrawTextW(memDC, L"Game Library Compactor (CompactOS)", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(memDC, L"Game Library Compactor", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // Close button [X]
     m_rcClose = { w - 38, 8, w - 10, 34 };
@@ -397,63 +469,108 @@ void CompactorWindow::OnPaint(HDC hdc) {
     fillRoundRect(gfx, 12.0f, 48.0f, (float)(w - 24), 72.0f, 6.0f, cardBg, &cardPen);
 
     // Summary stats
-    wchar_t statStr[128];
+    size_t dsCount = 0;
+    for (const auto &game : games) {
+      if (game.hasDirectStorage) dsCount++;
+    }
+
+    wchar_t statStr[160];
     double savedPct = (totalUncompressed > 0) ? ((double)totalReclaimed / (double)totalUncompressed) * 100.0 : 0.0;
-    swprintf_s(statStr, L"%zu Games Found   \u2022   Total: %ls   \u2022   Saved: %ls (%.1f%%)",
-               games.size(), FormatBytes(totalUncompressed).c_str(),
-               FormatBytes(totalReclaimed).c_str(), savedPct);
+    if (dsCount > 0) {
+      swprintf_s(statStr, L"%zu Games Found   \u2022   Total: %ls   \u2022   Saved: %ls (%.1f%%)   \u2022   %zu DirectStorage protected",
+                 games.size(), FormatBytes(totalUncompressed).c_str(),
+                 FormatBytes(totalReclaimed).c_str(), savedPct, dsCount);
+    } else {
+      swprintf_s(statStr, L"%zu Games Found   \u2022   Total: %ls   \u2022   Saved: %ls (%.1f%%)",
+                 games.size(), FormatBytes(totalUncompressed).c_str(),
+                 FormatBytes(totalReclaimed).c_str(), savedPct);
+    }
 
     RECT strRect = { 24, 52, w - 24, 76 };
     SetTextColor(memDC, RGB(235, 235, 240));
     SelectObject(memDC, m_boldFont);
     DrawTextW(memDC, statStr, -1, &strRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    // Algorithm selector pills (height 28, radius 6, matching MainWindow buttons)
+    // Algorithm selector pills (matching MainWindowWin32 pillRow)
     CompactAlgo currentAlgo = CompactorService::Get().GetSelectedAlgo();
+    int trackX = 24;
+    int trackY = 82;
+    int trackW = 190;
+    int trackH = 26;
+    int halfW = (trackW - 2) / 2;
 
-    m_rcAlgoLzx = { 24, 82, 134, 110 };
+    // Track background (#181820 / RGB 24, 24, 32)
+    Gdiplus::SolidBrush trackBrush(Gdiplus::Color(255, 24, 24, 32));
+    Gdiplus::Pen trackPen(Gdiplus::Color(255, 34, 34, 44), 1.0f);
+    fillRoundRect(gfx, (float)trackX, (float)trackY, (float)trackW, (float)trackH, 6.0f, trackBrush, &trackPen);
+
+    // LZX pill
+    m_rcAlgoLzx = { trackX, trackY, trackX + halfW, trackY + trackH };
     bool isLzx = (currentAlgo == CompactAlgo::LZX);
-    Gdiplus::SolidBrush lzxBg(isLzx ? Gdiplus::Color(255, 28, 48, 40) : Gdiplus::Color(255, 28, 28, 38));
-    Gdiplus::Pen lzxPen(isLzx ? Gdiplus::Color(255, 50, 240, 180) : Gdiplus::Color(255, 52, 52, 66), 1.0f);
-    fillRoundRect(gfx, (float)m_rcAlgoLzx.left, (float)m_rcAlgoLzx.top,
-                  (float)(m_rcAlgoLzx.right - m_rcAlgoLzx.left), (float)(m_rcAlgoLzx.bottom - m_rcAlgoLzx.top),
-                  6.0f, lzxBg, &lzxPen);
-    SetTextColor(memDC, isLzx ? RGB(50, 240, 180) : RGB(220, 220, 230));
+    if (isLzx) {
+      Gdiplus::SolidBrush activeBrush(Gdiplus::Color(255, 139, 38, 42)); // Omen Crimson #8B262A
+      Gdiplus::Pen activePen(Gdiplus::Color(255, 180, 52, 58), 1.0f);   // #B4343A
+      fillRoundRect(gfx, (float)m_rcAlgoLzx.left + 1.0f, (float)m_rcAlgoLzx.top + 1.0f,
+                    (float)halfW - 2.0f, (float)trackH - 2.0f, 5.0f, activeBrush, &activePen);
+    }
+    SetTextColor(memDC, isLzx ? RGB(255, 255, 255) : RGB(154, 154, 162));
     SelectObject(memDC, m_normFont);
     DrawTextW(memDC, L"LZX (Max)", -1, &m_rcAlgoLzx, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    m_rcAlgoXpress = { 142, 82, 272, 110 };
+    // XPRESS8K pill
+    m_rcAlgoXpress = { trackX + halfW + 2, trackY, trackX + trackW, trackY + trackH };
     bool isXp = (currentAlgo == CompactAlgo::XPRESS8K);
-    Gdiplus::SolidBrush xpBg(isXp ? Gdiplus::Color(255, 28, 48, 40) : Gdiplus::Color(255, 28, 28, 38));
-    Gdiplus::Pen xpPen(isXp ? Gdiplus::Color(255, 50, 240, 180) : Gdiplus::Color(255, 52, 52, 66), 1.0f);
-    fillRoundRect(gfx, (float)m_rcAlgoXpress.left, (float)m_rcAlgoXpress.top,
-                  (float)(m_rcAlgoXpress.right - m_rcAlgoXpress.left), (float)(m_rcAlgoXpress.bottom - m_rcAlgoXpress.top),
-                  6.0f, xpBg, &xpPen);
-    SetTextColor(memDC, isXp ? RGB(50, 240, 180) : RGB(220, 220, 230));
+    if (isXp) {
+      Gdiplus::SolidBrush activeBrush(Gdiplus::Color(255, 139, 38, 42)); // Omen Crimson #8B262A
+      Gdiplus::Pen activePen(Gdiplus::Color(255, 180, 52, 58), 1.0f);   // #B4343A
+      fillRoundRect(gfx, (float)m_rcAlgoXpress.left + 1.0f, (float)m_rcAlgoXpress.top + 1.0f,
+                    (float)halfW - 2.0f, (float)trackH - 2.0f, 5.0f, activeBrush, &activePen);
+    }
+    SetTextColor(memDC, isXp ? RGB(255, 255, 255) : RGB(154, 154, 162));
     DrawTextW(memDC, L"XPRESS8K (Fast)", -1, &m_rcAlgoXpress, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    // Rescan button (matching MainWindow button style)
-    m_rcRescan = { w - 236, 82, w - 146, 110 };
-    Gdiplus::SolidBrush rescanBg(Gdiplus::Color(255, 28, 28, 38));
-    Gdiplus::Pen rescanPen(Gdiplus::Color(255, 52, 52, 66), 1.0f);
+    // Standard button styling matching MainWindowWin32
+    Gdiplus::Color stdBtnBg = Gdiplus::Color(255, 28, 28, 38);
+    Gdiplus::Pen stdBtnPen(Gdiplus::Color(255, 52, 52, 66), 1.0f);
+
+    // Add Folder... button
+    m_rcAddFolder = { w - 325, 82, w - 225, 108 };
+    fillRoundRect(gfx, (float)m_rcAddFolder.left, (float)m_rcAddFolder.top,
+                  (float)(m_rcAddFolder.right - m_rcAddFolder.left), (float)(m_rcAddFolder.bottom - m_rcAddFolder.top),
+                  6.0f, Gdiplus::SolidBrush(stdBtnBg), &stdBtnPen);
+    SetTextColor(memDC, RGB(235, 235, 240));
+    SelectObject(memDC, m_normFont);
+    DrawTextW(memDC, L"Add Folder...", -1, &m_rcAddFolder, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    // Rescan button
+    m_rcRescan = { w - 215, 82, w - 130, 108 };
     fillRoundRect(gfx, (float)m_rcRescan.left, (float)m_rcRescan.top,
                   (float)(m_rcRescan.right - m_rcRescan.left), (float)(m_rcRescan.bottom - m_rcRescan.top),
-                  6.0f, rescanBg, &rescanPen);
+                  6.0f, Gdiplus::SolidBrush(stdBtnBg), &stdBtnPen);
     SetTextColor(memDC, RGB(235, 235, 240));
     SelectObject(memDC, m_normFont);
     DrawTextW(memDC, L"Rescan", -1, &m_rcRescan, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     // Compact All button (matching MainWindow button style)
     bool isBusy = CompactorService::Get().IsBusy();
-    m_rcCompactAll = { w - 138, 82, w - 24, 110 };
-    Gdiplus::SolidBrush caBg(isBusy ? Gdiplus::Color(255, 60, 24, 28) : Gdiplus::Color(255, 20, 52, 36));
-    Gdiplus::Pen caPen(isBusy ? Gdiplus::Color(255, 230, 80, 90) : Gdiplus::Color(255, 50, 240, 180), 1.0f);
-    fillRoundRect(gfx, (float)m_rcCompactAll.left, (float)m_rcCompactAll.top,
-                  (float)(m_rcCompactAll.right - m_rcCompactAll.left), (float)(m_rcCompactAll.bottom - m_rcCompactAll.top),
-                  6.0f, caBg, &caPen);
-    SetTextColor(memDC, isBusy ? RGB(255, 100, 110) : RGB(50, 240, 180));
-    SelectObject(memDC, m_boldFont);
-    DrawTextW(memDC, isBusy ? L"Cancel" : L"Compact All", -1, &m_rcCompactAll, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    m_rcCompactAll = { w - 120, 82, w - 24, 108 };
+    if (isBusy) {
+      Gdiplus::SolidBrush caBg(Gdiplus::Color(255, 139, 38, 42)); // Omen Crimson Cancel
+      Gdiplus::Pen caPen(Gdiplus::Color(255, 180, 52, 58), 1.0f);
+      fillRoundRect(gfx, (float)m_rcCompactAll.left, (float)m_rcCompactAll.top,
+                    (float)(m_rcCompactAll.right - m_rcCompactAll.left), (float)(m_rcCompactAll.bottom - m_rcCompactAll.top),
+                    6.0f, caBg, &caPen);
+      SetTextColor(memDC, RGB(255, 255, 255));
+      SelectObject(memDC, m_normFont);
+      DrawTextW(memDC, L"Cancel", -1, &m_rcCompactAll, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    } else {
+      fillRoundRect(gfx, (float)m_rcCompactAll.left, (float)m_rcCompactAll.top,
+                    (float)(m_rcCompactAll.right - m_rcCompactAll.left), (float)(m_rcCompactAll.bottom - m_rcCompactAll.top),
+                    6.0f, Gdiplus::SolidBrush(stdBtnBg), &stdBtnPen);
+      SetTextColor(memDC, RGB(235, 235, 240));
+      SelectObject(memDC, m_normFont);
+      DrawTextW(memDC, L"Compact All", -1, &m_rcCompactAll, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
 
     // ── Scrollable Games List ──
     int listY = 128;
@@ -470,7 +587,7 @@ void CompactorWindow::OnPaint(HDC hdc) {
       RECT noGamesRect = { 20, listY + 60, w - 20, listY + 120 };
       SetTextColor(memDC, RGB(140, 140, 160));
       SelectObject(memDC, m_normFont);
-      DrawTextW(memDC, L"No games found. Ensure Steam, Epic, or Hydra games are installed on this system.",
+      DrawTextW(memDC, L"No games found. Ensure Steam, Epic, Hydra, or custom game folders are added.",
                 -1, &noGamesRect, DT_CENTER | DT_WORDBREAK);
     } else {
       int curY = listY - m_scrollOffset;
@@ -487,44 +604,30 @@ void CompactorWindow::OnPaint(HDC hdc) {
           Gdiplus::Pen gCardPen(Gdiplus::Color(255, 34, 34, 46), 1.0f);
           fillRoundRect(gfx, itemX, (float)curY, itemW, (float)kItemH, 6.0f, gCardBg, &gCardPen);
 
-          // Launcher Badge
-          Gdiplus::Color badgeBg = Gdiplus::Color(255, 27, 40, 56);
-          Gdiplus::Color badgeBorder = Gdiplus::Color(255, 42, 71, 94);
-          COLORREF badgeTxt = RGB(0, 180, 240);
+          // Launcher Badge (Subtle dark pill matching theme)
+          Gdiplus::SolidBrush bBrush(Gdiplus::Color(255, 24, 24, 32));
+          Gdiplus::Pen bPen(Gdiplus::Color(255, 42, 42, 56), 1.0f);
+          fillRoundRect(gfx, itemX + 12.0f, (float)curY + 12.0f, 54.0f, 20.0f, 4.0f, bBrush, &bPen);
 
-          if (g.launcher == L"Epic") {
-            badgeBg = Gdiplus::Color(255, 20, 42, 40);
-            badgeBorder = Gdiplus::Color(255, 0, 150, 136);
-            badgeTxt = RGB(0, 220, 180);
-          } else if (g.launcher == L"Hydra") {
-            badgeBg = Gdiplus::Color(255, 40, 20, 55);
-            badgeBorder = Gdiplus::Color(255, 155, 89, 182);
-            badgeTxt = RGB(190, 130, 240);
-          }
-
-          Gdiplus::SolidBrush bBrush(badgeBg);
-          Gdiplus::Pen bPen(badgeBorder, 1.0f);
-          fillRoundRect(gfx, itemX + 12.0f, (float)curY + 12.0f, 48.0f, 20.0f, 4.0f, bBrush, &bPen);
-
-          RECT badgeRect = { (int)itemX + 12, curY + 12, (int)itemX + 60, curY + 32 };
-          SetTextColor(memDC, badgeTxt);
+          RECT badgeRect = { (int)itemX + 12, curY + 12, (int)itemX + 66, curY + 32 };
+          SetTextColor(memDC, RGB(165, 165, 180));
           SelectObject(memDC, m_smallFont);
           DrawTextW(memDC, g.launcher.c_str(), -1, &badgeRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-          // DirectStorage Badge (Amber pill if game utilizes Microsoft DirectStorage)
-          int titleLeft = (int)itemX + 68;
+          // DirectStorage Badge (Muted amber pill if game utilizes Microsoft DirectStorage)
+          int titleLeft = (int)itemX + 74;
           if (g.hasDirectStorage) {
-            float dsX = itemX + 65.0f;
-            float dsW = 90.0f;
-            Gdiplus::SolidBrush dsBrush(Gdiplus::Color(255, 45, 32, 16));
-            Gdiplus::Pen dsPen(Gdiplus::Color(255, 230, 160, 30), 1.0f);
+            float dsX = itemX + 72.0f;
+            float dsW = 92.0f;
+            Gdiplus::SolidBrush dsBrush(Gdiplus::Color(255, 34, 28, 20));
+            Gdiplus::Pen dsPen(Gdiplus::Color(255, 80, 65, 40), 1.0f);
             fillRoundRect(gfx, dsX, (float)curY + 12.0f, dsW, 20.0f, 4.0f, dsBrush, &dsPen);
 
             RECT dsRect = { (int)dsX, curY + 12, (int)(dsX + dsW), curY + 32 };
-            SetTextColor(memDC, RGB(255, 175, 45));
+            SetTextColor(memDC, RGB(205, 170, 100));
             SelectObject(memDC, m_smallFont);
             DrawTextW(memDC, L"DirectStorage", -1, &dsRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            titleLeft += 94;
+            titleLeft += 96;
           }
 
           // Game Title (Segoe UI bold 14px)
@@ -557,7 +660,9 @@ void CompactorWindow::OnPaint(HDC hdc) {
                        g.savingsPercent,
                        g.hasDirectStorage ? L"   \u2022   \u26A0 DirectStorage" : L"");
           } else {
-            if (!g.analysisNote.empty()) {
+            if (g.hasDirectStorage && CompactorService::Get().IsBusy()) {
+              swprintf_s(sizeBuf, L"%ls   \u2022   \u26A0 DirectStorage: Skipped by Compact All", FormatBytes(g.uncompressedBytes).c_str());
+            } else if (!g.analysisNote.empty()) {
               swprintf_s(sizeBuf, L"%ls   \u2022   %ls", FormatBytes(g.uncompressedBytes).c_str(), g.analysisNote.c_str());
             } else {
               swprintf_s(sizeBuf, L"%ls on disk   \u2022   Not Compacted", FormatBytes(g.uncompressedBytes).c_str());
@@ -565,23 +670,32 @@ void CompactorWindow::OnPaint(HDC hdc) {
           }
 
           RECT subRect = { (int)itemX + 14, curY + 38, (int)itemX + w - 160, curY + 62 };
+          if (g.state == GameCompactionState::Compacting || g.state == GameCompactionState::Decompacting) {
+            float spinX = itemX + 14.0f;
+            float spinY = (float)curY + 43.0f;
+            float spinSize = 13.0f;
+            Gdiplus::Pen trackPen(Gdiplus::Color(60, 180, 205, 230), 2.0f);
+            gfx.DrawEllipse(&trackPen, spinX, spinY, spinSize, spinSize);
+            Gdiplus::Pen arcPen(Gdiplus::Color(255, 180, 205, 230), 2.0f);
+            gfx.DrawArc(&arcPen, spinX, spinY, spinSize, spinSize, m_spinnerAngle, 110.0f);
+            subRect.left += 20;
+          }
+
           if (g.hasDirectStorage && g.state != GameCompactionState::Compacted) {
-            SetTextColor(memDC, RGB(255, 175, 45)); // Amber warning
+            SetTextColor(memDC, RGB(205, 170, 100)); // Muted amber
           } else if (g.state == GameCompactionState::Compacted) {
-            SetTextColor(memDC, RGB(50, 240, 180)); // Electric green
+            SetTextColor(memDC, RGB(170, 200, 185)); // Soft sage
           } else if (g.state == GameCompactionState::Compacting || g.state == GameCompactionState::Decompacting) {
-            SetTextColor(memDC, RGB(0, 212, 255)); // Cyan
-          } else if (g.rating == CompressibilityRating::High) {
-            SetTextColor(memDC, RGB(180, 220, 200));
+            SetTextColor(memDC, RGB(180, 205, 230)); // Soft ice blue
           } else {
-            SetTextColor(memDC, RGB(140, 140, 155));
+            SetTextColor(memDC, RGB(145, 145, 160)); // Neutral gray
           }
           SelectObject(memDC, m_normFont);
           DrawTextW(memDC, sizeBuf, -1, &subRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
           // Action Button (matching main window button size & font)
-          int btnW = 100;
-          int btnH = 30;
+          int btnW = 95;
+          int btnH = 26;
           int btnX = (int)itemX + (int)itemW - btnW - 14;
           int btnY = curY + (kItemH - btnH) / 2;
 
@@ -599,24 +713,15 @@ void CompactorWindow::OnPaint(HDC hdc) {
           const wchar_t *btnLabel = L"Compact";
 
           if (gar.isCancel) {
-            actBg = Gdiplus::Color(255, 60, 24, 28);
-            actBorder = Gdiplus::Color(255, 230, 80, 90);
-            actTxt = RGB(255, 100, 110);
+            actBg = Gdiplus::Color(255, 139, 38, 42); // Omen Crimson Cancel
+            actBorder = Gdiplus::Color(255, 180, 52, 58);
+            actTxt = RGB(255, 255, 255);
             btnLabel = L"Cancel";
           } else if (gar.isDecompact) {
-            actBg = Gdiplus::Color(255, 28, 28, 38);
-            actBorder = Gdiplus::Color(255, 52, 52, 66);
-            actTxt = RGB(200, 200, 215);
+            actBg = Gdiplus::Color(255, 24, 24, 32);
+            actBorder = Gdiplus::Color(255, 42, 42, 54);
+            actTxt = RGB(170, 170, 185);
             btnLabel = L"Decompact";
-          } else if (g.hasDirectStorage) {
-            // Amber caution styling for DirectStorage overrides
-            actBg = Gdiplus::Color(255, 45, 32, 16);
-            actBorder = Gdiplus::Color(255, 230, 160, 30);
-            actTxt = RGB(255, 175, 45);
-          } else {
-            actBg = Gdiplus::Color(255, 20, 52, 36);
-            actBorder = Gdiplus::Color(255, 50, 240, 180);
-            actTxt = RGB(50, 240, 180);
           }
 
           Gdiplus::SolidBrush actBrush(actBg);

@@ -52,7 +52,6 @@ void FanService::SaveConfig() {
   j["fan_profile"] = (int)m_profile.load();
   j["amd_curve_optimizer"] = m_overlayConfig.amdCurveOptimizer;
   j["battery_limit"] = m_overlayConfig.batteryLimit;
-  j["display_overdrive"] = m_overlayConfig.displayOverdrive;
   j["minimize_on_close"] = m_overlayConfig.minimizeOnClose;
   j["log_enabled"] = m_overlayConfig.logEnabled;
   j["gpu_power_level"] = m_overlayConfig.gpuPowerLevel;
@@ -60,7 +59,6 @@ void FanService::SaveConfig() {
   j["game_auto_profile"] = m_overlayConfig.gameAutoProfile;
   j["wake_on_lan"] = m_overlayConfig.wakeOnLan;
   j["wake_on_wlan_bt"] = m_overlayConfig.wakeOnWlanBt;
-  j["low_latency_network"] = m_overlayConfig.lowLatencyNetwork;
 
   nlohmann::json &hud = j["hud"];
   hud["show"] = m_overlayConfig.show;
@@ -77,6 +75,17 @@ void FanService::SaveConfig() {
   api["port"] = m_overlayConfig.apiPort;
   api["bind_all"] = m_overlayConfig.apiBindAll;
   api["token"] = m_overlayConfig.apiToken;
+
+  nlohmann::json customArr = nlohmann::json::array();
+  for (const auto &wpath : m_overlayConfig.customGameFolders) {
+    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, wpath.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (utf8Len > 0) {
+      std::string utf8Str(utf8Len - 1, 0);
+      WideCharToMultiByte(CP_UTF8, 0, wpath.c_str(), -1, &utf8Str[0], utf8Len, nullptr, nullptr);
+      customArr.push_back(utf8Str);
+    }
+  }
+  j["custom_game_folders"] = customArr;
 
   std::ofstream f(ConfigPath());
   if (f.is_open())
@@ -120,9 +129,6 @@ void FanService::LoadConfig() {
     if (j.contains("battery_limit"))
       m_overlayConfig.batteryLimit = j["battery_limit"].get<int>();
 
-    if (j.contains("display_overdrive"))
-      m_overlayConfig.displayOverdrive = j["display_overdrive"].get<bool>();
-
     if (j.contains("minimize_on_close"))
       m_overlayConfig.minimizeOnClose = j["minimize_on_close"].get<bool>();
 
@@ -147,8 +153,6 @@ void FanService::LoadConfig() {
       m_overlayConfig.wakeOnLan = j["wake_on_lan"].get<bool>();
     if (j.contains("wake_on_wlan_bt"))
       m_overlayConfig.wakeOnWlanBt = j["wake_on_wlan_bt"].get<bool>();
-    if (j.contains("low_latency_network"))
-      m_overlayConfig.lowLatencyNetwork = j["low_latency_network"].get<bool>();
 
     PowerControl::Get().SetAcEnabled(m_overlayConfig.autoPowerSwitch);
 
@@ -188,6 +192,34 @@ void FanService::LoadConfig() {
         m_overlayConfig.apiBindAll = api["bind_all"].get<bool>();
       if (api.contains("token"))
         m_overlayConfig.apiToken = api["token"].get<std::string>();
+    }
+
+    // Custom game folders for Game Compactor (with automatic cleanup if folder deleted)
+    m_overlayConfig.customGameFolders.clear();
+    bool configModified = false;
+    if (j.contains("custom_game_folders") && j["custom_game_folders"].is_array()) {
+      for (const auto &item : j["custom_game_folders"]) {
+        if (item.is_string()) {
+          std::string s = item.get<std::string>();
+          int wLen = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+          if (wLen > 0) {
+            std::wstring ws(wLen - 1, 0);
+            MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], wLen);
+
+            DWORD attrs = GetFileAttributesW(ws.c_str());
+            if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+              m_overlayConfig.customGameFolders.push_back(ws);
+            } else {
+              // Folder no longer exists on disk -> prune from config
+              configModified = true;
+            }
+          }
+        }
+      }
+    }
+
+    if (configModified) {
+      SaveConfig();
     }
   } catch (...) {
   }

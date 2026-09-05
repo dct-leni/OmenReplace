@@ -11,8 +11,6 @@ public:
   void Show(HWND hParent = nullptr);
   void Hide();
   void Destroy();
-  bool IsVisible() const { return m_hwnd && IsWindowVisible(m_hwnd); }
-  HWND GetHwnd() const { return m_hwnd; }
 
 private:
   CompactorWindow();
@@ -27,6 +25,8 @@ private:
   void OnMouseMove(int x, int y);
   void OnMouseWheel(int delta);
   void OnTimer();
+  void UpdateTimerState();
+  void OnAddFolder();
 
   HWND m_hwnd = nullptr;
   HWND m_hParent = nullptr;
@@ -46,6 +46,7 @@ private:
   RECT m_rcClose = {0};
   RECT m_rcCompactAll = {0};
   RECT m_rcRescan = {0};
+  RECT m_rcAddFolder = {0};
   RECT m_rcAlgoLzx = {0};
   RECT m_rcAlgoXpress = {0};
 

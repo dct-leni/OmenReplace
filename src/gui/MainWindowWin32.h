@@ -23,10 +23,6 @@ private:
   void OnTimer();
   void OnLButtonDown(int x, int y);
 
-  // Layout helpers.
-  struct Card { int y, h; };
-  Card LayoutCard(int y, const wchar_t *title);
-
   // Control hit rects (client coords) rebuilt each paint. [y0,y1,x0,x1].
   int m_powerPill[4][4];
   int m_fanPill[4][4];
@@ -40,8 +36,8 @@ private:
   int m_btnCoMinus[4]; // [y0,y1,x0,x1]
   int m_btnCoPlus[4];  // [y0,y1,x0,x1]
   int m_tctlPill[4][4]; // Auto | 95 | 90 | 85
-  // [slot][y0,y1,x0,x1]: battery, autostart, minimize, showhud, passive, api,
-  // wol, autopower, gameauto, overdrive, wlanbt, netgaming
+  // Switches: battery, autostart, minimize, showhud, passthrough, api,
+  // wol, autopower, gameauto, wlanbt
   int m_chk[13][4];
 
   void UpdateWindowHeight();

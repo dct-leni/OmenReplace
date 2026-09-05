@@ -7,6 +7,8 @@
 #include <mutex>
 #include <string>
 
+#include <vector>
+
 enum class FanControlMode { Auto = 0, AppMode = 2 };
 enum class FanControlProfile { Default = 0, Quiet = 1, Cool = 2 };
 
@@ -40,7 +42,6 @@ public:
     // System settings
     int powerMode = 1; // 0=Eco, 1=Balanced, 2=Perf
     int batteryLimit = 80;
-    bool displayOverdrive = true;
     bool minimizeOnClose = true;
     bool logEnabled = false;
     // GPU power (TGP) override: -1=Auto, 0..2=Min/Med/Max
@@ -54,13 +55,13 @@ public:
     // Wake settings (Windows driver + HP BIOS S4/S5 & WLAN/BT)
     bool wakeOnLan = false;
     bool wakeOnWlanBt = false;
-    // Low-Latency Network & OS Gaming Tweak (NetworkThrottlingIndex = 0xFFFFFFFF)
-    bool lowLatencyNetwork = true;
     // Embedded API configuration
     bool apiEnabled = true;
     int apiPort = 8080;
     bool apiBindAll = false;
     std::string apiToken = "";
+    // Custom game directories for Game Compactor
+    std::vector<std::wstring> customGameFolders;
   };
 
   OverlayConfig &GetOverlayConfig() { return m_overlayConfig; }

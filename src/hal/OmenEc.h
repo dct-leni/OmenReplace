@@ -18,13 +18,7 @@ public:
     // High-level accessors
     float GetFan1Speed();
     float GetFan2Speed();
-    float GetFan1Percentage(); // Reads 0x2E
-    float GetFan2Percentage(); // Reads 0x2F
     float GetGpuTemp(); 
-
-    // PCI Config Access via PawnIO
-    bool PciWriteDword(uint8_t bus, uint8_t dev, uint8_t func, uint32_t reg, uint32_t val);
-    bool PciReadDword(uint8_t bus, uint8_t dev, uint8_t func, uint32_t reg, uint32_t& val);
 
     // SMU Communication (AMD Ryzen)
     // Uses PCI config registers 0xC4/0xC8 to access SMN (System Management Network)
@@ -48,7 +42,6 @@ public:
     float GetCpuTemp58(); // RTMP
     
     uint8_t ReadByte(uint8_t offset);
-    uint16_t ReadWord(uint8_t offset_l, uint8_t offset_h);
     void WriteByte(uint8_t offset, uint8_t value);
 
     // SMBus DIMM thermal via embedded SmbusPIIX4.bin module (kernel SMBus
@@ -88,7 +81,6 @@ private:
     uint8_t ReadPort(uint16_t port);
     void WritePort(uint16_t port, uint8_t value);
     bool WaitEcInputEmpty();
-    bool WaitEcOutputFull();
     
     // HP Omen EC offsets (Dynamic based on model research)
     // Source of truth: external_source/omencore PawnIOEcAccess.cs + FanController.cs

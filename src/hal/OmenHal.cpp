@@ -18,6 +18,8 @@ OmenHal &OmenHal::Get() {
   return instance;
 }
 
+std::atomic<bool> g_gameTimerActive{false};
+
 // Foreground window covers its whole monitor without a caption style —
 // borderless/exclusive fullscreen (games, slideshow apps).
 static bool ForegroundFullscreen() {
@@ -100,6 +102,13 @@ void OmenHal::Shutdown() {
   if (m_workerThread.joinable())
     m_workerThread.join();
 
+  // Ensure high-resolution timer and thread execution state are cleanly restored
+  extern std::atomic<bool> g_gameTimerActive;
+  if (g_gameTimerActive.exchange(false)) {
+    timeEndPeriod(1);
+    SetThreadExecutionState(ES_CONTINUOUS);
+  }
+
   OmenLog("[AMDOMEN] Shutdown restoring fan control to BIOS hardware\n");
   FanController::Get().RestoreBios();
 
@@ -174,14 +183,6 @@ bool OmenHal::SetBatteryChargeLimit(int percentage) {
   return PowerControl::Get().SetBatteryChargeLimit(percentage);
 }
 
-bool OmenHal::GetDisplayOverdrive() {
-  return PowerControl::Get().GetDisplayOverdrive();
-}
-
-bool OmenHal::SetDisplayOverdrive(bool enable) {
-  return PowerControl::Get().SetDisplayOverdrive(enable);
-}
-
 bool OmenHal::SetAmdCurveOptimizer(int coCounts) {
   FanService::Get().GetOverlayConfig().amdCurveOptimizer = coCounts;
   PowerControl::Get().SetCachedAmdCurveOptimizer(coCounts);
@@ -208,12 +209,6 @@ bool OmenHal::SetTctlTemp(int tempC) {
   return PowerControl::Get().SetTctlTemp(tempC);
 }
 
-bool OmenHal::GetIsDesktop() { return m_isDesktop; }
-
-bool OmenHal::GetIsAnotherFanControllerActive() {
-  return m_anotherFanControllerActive;
-}
-
 void OmenHal::BackgroundLoop() {
   HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   if (FAILED(comResult)) {
@@ -231,11 +226,6 @@ void OmenHal::BackgroundLoop() {
     OmenLog("%s", message);
     m_fanControlReady = true;
     PowerControl::Get().InitGpuMux();
-    WmiHelper wmi;
-    if (wmi.Initialize()) {
-      m_isDesktop = wmi.IsDesktopMode();
-      wmi.Cleanup();
-    }
   }
 
   // ═════════════════════════════════════════════════════════════════════════
@@ -248,12 +238,11 @@ void OmenHal::BackgroundLoop() {
     int hwCo = PowerControl::Get().ReadHardwareAmdCurveOptimizer();
     int hwTctl = PowerControl::Get().ReadHardwareTctlLimit();
     int hwBattery = PowerControl::Get().ReadHardwareBatteryLimit();
-    bool hwOverdrive = PowerControl::Get().ReadHardwareDisplayOverdrive();
     int hwPowerW = 0, hwTempC = 0;
     PowerControl::Get().GetPowerThermalLimits(hwPowerW, hwTempC);
 
-    OmenLog("[AMDOMEN] Startup HW Discovery: PowerMode=%d, GPU=%d, CO=%d, Tctl=%dC, Battery=%d%%, Overdrive=%d, PPT=%dW\n",
-            (int)hwPowerMode, hwGpuPower, hwCo, hwTctl, hwBattery, hwOverdrive ? 1 : 0, hwPowerW);
+    OmenLog("[AMDOMEN] Startup HW Discovery: PowerMode=%d, GPU=%d, CO=%d, Tctl=%dC, Battery=%d%%, PPT=%dW\n",
+            (int)hwPowerMode, hwGpuPower, hwCo, hwTctl, hwBattery, hwPowerW);
 
     // PHASE 2: Compare with Config Targets
     auto &cfg = FanService::Get().GetOverlayConfig();
@@ -270,7 +259,6 @@ void OmenHal::BackgroundLoop() {
     int targetCo = cfg.amdCurveOptimizer;
     int targetTctl = cfg.tctlLimit;
     int targetBattery = cfg.batteryLimit;
-    bool targetOverdrive = cfg.displayOverdrive;
 
     // PHASE 3: Write Only If Different (Never spam redundant power schemes)
     if (hwPowerMode != targetMode) {
@@ -307,20 +295,11 @@ void OmenHal::BackgroundLoop() {
       PowerControl::Get().SetBatteryChargeLimit(targetBattery);
     }
 
-    if (hwOverdrive != targetOverdrive) {
-      OmenLog("[AMDOMEN] Display Overdrive differs (HW=%d, Cfg=%d) -> Applying target\n",
-              hwOverdrive ? 1 : 0, targetOverdrive ? 1 : 0);
-      PowerControl::Get().SetDisplayOverdrive(targetOverdrive);
-    }
-
     if (cfg.wakeOnLan) {
       PowerControl::Get().SetWakeOnLan(true);
     }
     if (cfg.wakeOnWlanBt) {
       PowerControl::Get().SetWakeOnWlanBt(true);
-    }
-    if (cfg.lowLatencyNetwork) {
-      PowerControl::Get().SetNetworkGamingTweak(true);
     }
 
     if (FanService::Get().GetControlMode() == FanControlMode::AppMode) {
@@ -419,7 +398,10 @@ void OmenHal::BackgroundLoop() {
                 }
               }
             }
-            timeBeginPeriod(1); // 1.0ms high-resolution timer
+            if (!g_gameTimerActive.exchange(true)) {
+              timeBeginPeriod(1); // 1.0ms high-resolution timer
+              SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+            }
           }
         } else {
           gameHighSecs = 0;
@@ -452,7 +434,10 @@ void OmenHal::BackgroundLoop() {
               gameSavedPid = 0;
               gameSavedAffinity = 0;
             }
-            timeEndPeriod(1);
+            if (g_gameTimerActive.exchange(false)) {
+              timeEndPeriod(1);
+              SetThreadExecutionState(ES_CONTINUOUS);
+            }
           }
         } else {
           gameLowSecs = 0;
@@ -479,7 +464,10 @@ void OmenHal::BackgroundLoop() {
         gameSavedPid = 0;
         gameSavedAffinity = 0;
       }
-      timeEndPeriod(1);
+      if (g_gameTimerActive.exchange(false)) {
+        timeEndPeriod(1);
+        SetThreadExecutionState(ES_CONTINUOUS);
+      }
     }
 
     // ── HUD topmost reassert (fullscreen apps can demote it) ────────────
@@ -504,23 +492,6 @@ void OmenHal::BackgroundLoop() {
     if (updateCounter >= 100)
       updateCounter = 0;
 
-    // 2. Poll WMI for system sensors and desktop fan tools
-    static auto lastSlowerPoll = std::chrono::steady_clock::now();
-    auto loopEnd = std::chrono::steady_clock::now();
-
-    if (std::chrono::duration_cast<std::chrono::milliseconds>(loopEnd -
-                                                              lastSlowerPoll)
-            .count() >= 2000) {
-      if (m_isDesktop) {
-        WmiHelper wmi;
-        if (wmi.Initialize()) {
-          m_anotherFanControllerActive = wmi.IsAnotherFanControllerActive();
-          wmi.Cleanup();
-        }
-      }
-
-      lastSlowerPoll = std::chrono::steady_clock::now();
-    }
 
     auto end = std::chrono::steady_clock::now();
     auto elapsed =
@@ -564,7 +535,6 @@ float OmenHal::GetFanSpeed(int fanIndex) {
 float OmenHal::GetFanPercentage(int fanIndex) {
   return FanService::Get().GetFanPercentage(fanIndex);
 }
-bool OmenHal::GetDriverStatus() { return OmenEc::Get().IsInitialized(); }
 void OmenHal::SetFanAuto() { FanService::Get().SetFanAuto(); }
 
 void OmenHal::SetPowerMode(int mode) {
@@ -591,20 +561,9 @@ void OmenHal::RequestGpuMode(int mode) {
   PowerControl::Get().RequestGpuMode(mode);
 }
 
-int OmenHal::GetFanControlMode() {
-  return (int)FanService::Get().GetControlMode();
-}
-
-void OmenHal::SetFanControlMode(int mode) {
-  FanService::Get().SetControlMode((FanControlMode)mode);
-}
-
 void OmenHal::OptimizeMemory() { MemoryService::Get().Optimize(); }
 
 bool OmenHal::GetWakeOnLan() { return PowerControl::Get().GetWakeOnLan(); }
 bool OmenHal::SetWakeOnLan(bool enable) { return PowerControl::Get().SetWakeOnLan(enable); }
 bool OmenHal::GetWakeOnWlanBt() { return PowerControl::Get().GetWakeOnWlanBt(); }
 bool OmenHal::SetWakeOnWlanBt(bool enable) { return PowerControl::Get().SetWakeOnWlanBt(enable); }
-
-bool OmenHal::GetNetworkGamingTweak() { return PowerControl::Get().GetNetworkGamingTweak(); }
-bool OmenHal::SetNetworkGamingTweak(bool enable) { return PowerControl::Get().SetNetworkGamingTweak(enable); }

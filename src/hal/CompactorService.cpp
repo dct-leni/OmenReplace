@@ -1,4 +1,5 @@
 #include "CompactorService.h"
+#include "FanService.h"
 #include "OmenLog.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -29,6 +30,8 @@ std::wstring CompactorService::GetScanStatusText() const {
     return L"Scanning Epic Games manifests...";
   case ScanStage::ScanningHydra:
     return L"Scanning Hydra Launcher...";
+  case ScanStage::ScanningCustom:
+    return L"Scanning Custom game folders...";
   case ScanStage::MeasuringSizes:
     return L"Analyzing disk storage & compressibility...";
   case ScanStage::Complete:
@@ -84,7 +87,8 @@ bool CompactorService::CheckUsesDirectStorage(const std::wstring &installPath) {
   // DirectStorage files to search for
   static const wchar_t *kDsFiles[] = {
     L"dstorage.dll",
-    L"dstoragecore.dll"
+    L"dstoragecore.dll",
+    L"DirectStorage.dll"
   };
 
   // Common subdirectories where game binaries reside
@@ -92,12 +96,15 @@ bool CompactorService::CheckUsesDirectStorage(const std::wstring &installPath) {
     L"",
     L"\\binaries",
     L"\\binaries\\Win64",
+    L"\\binaries\\x64",
     L"\\bin",
     L"\\bin\\x64",
     L"\\bin64",
     L"\\x64",
     L"\\SP",
-    L"\\Engine\\Binaries\\ThirdParty\\DirectStorage"
+    L"\\Engine\\Binaries\\ThirdParty\\DirectStorage",
+    L"\\Engine\\Binaries\\ThirdParty\\DirectStorage\\Win64",
+    L"\\Engine\\Binaries\\ThirdParty\\DirectStorage\\x64"
   };
 
   for (const auto *sub : kSubdirs) {
@@ -110,9 +117,9 @@ bool CompactorService::CheckUsesDirectStorage(const std::wstring &installPath) {
     }
   }
 
-  // Quick recursive probe up to depth 2 looking specifically for dstorage.dll
+  // Quick recursive probe up to depth 4 looking specifically for DirectStorage DLLs
   auto probeDs = [](auto &self, const std::wstring &dir, int depth) -> bool {
-    if (depth > 2) return false;
+    if (depth > 4) return false;
     std::wstring search = dir + L"\\*";
     WIN32_FIND_DATAW fd;
     HANDLE hFind = FindFirstFileW(search.c_str(), &fd);
@@ -123,9 +130,22 @@ bool CompactorService::CheckUsesDirectStorage(const std::wstring &installPath) {
     do {
       if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
       if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-        if (depth < 2) subdirs.push_back(dir + L"\\" + fd.cFileName);
+        // Prune massive content/asset folders to keep directory scan fast
+        if (_wcsicmp(fd.cFileName, L"content") == 0 ||
+            _wcsicmp(fd.cFileName, L"paks") == 0 ||
+            _wcsicmp(fd.cFileName, L"data") == 0 ||
+            _wcsicmp(fd.cFileName, L"textures") == 0 ||
+            _wcsicmp(fd.cFileName, L"sound") == 0 ||
+            _wcsicmp(fd.cFileName, L"movies") == 0 ||
+            _wcsicmp(fd.cFileName, L"videos") == 0 ||
+            _wcsicmp(fd.cFileName, L"streamingassets") == 0) {
+          continue;
+        }
+        if (depth < 4) subdirs.push_back(dir + L"\\" + fd.cFileName);
       } else {
-        if (_wcsicmp(fd.cFileName, L"dstorage.dll") == 0 || _wcsicmp(fd.cFileName, L"dstoragecore.dll") == 0) {
+        if (_wcsicmp(fd.cFileName, L"dstorage.dll") == 0 ||
+            _wcsicmp(fd.cFileName, L"dstoragecore.dll") == 0 ||
+            _wcsicmp(fd.cFileName, L"directstorage.dll") == 0) {
           found = true;
           break;
         }
@@ -154,6 +174,9 @@ void CompactorService::ScanWorker() {
 
   m_scanStage = ScanStage::ScanningHydra;
   ScanHydra(discovered);
+
+  m_scanStage = ScanStage::ScanningCustom;
+  ScanCustom(discovered);
 
   m_scanStage = ScanStage::MeasuringSizes;
   for (auto &g : discovered) {
@@ -440,6 +463,97 @@ void CompactorService::ScanHydra(std::vector<GameEntry> &games) {
   }
 }
 
+void CompactorService::ScanCustom(std::vector<GameEntry> &games) {
+  auto &cfg = FanService::Get().GetOverlayConfig();
+  bool modified = false;
+  std::vector<std::wstring> validFolders;
+
+  for (const auto &folder : cfg.customGameFolders) {
+    DWORD attr = GetFileAttributesW(folder.c_str());
+    if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+      validFolders.push_back(folder);
+
+      bool exists = false;
+      for (const auto &g : games) {
+        if (_wcsicmp(g.installPath.c_str(), folder.c_str()) == 0) {
+          exists = true;
+          break;
+        }
+      }
+      if (!exists) {
+        GameEntry entry;
+        entry.id = folder;
+        size_t lastSlash = folder.find_last_of(L"\\/");
+        if (lastSlash != std::wstring::npos && lastSlash + 1 < folder.size()) {
+          entry.title = folder.substr(lastSlash + 1);
+        } else {
+          entry.title = folder;
+        }
+        entry.installPath = folder;
+        entry.launcher = L"Custom";
+        games.push_back(entry);
+      }
+    } else {
+      // Folder does not exist on disk anymore -> remove from config
+      modified = true;
+    }
+  }
+
+  if (modified) {
+    cfg.customGameFolders = validFolders;
+    FanService::Get().SaveConfig();
+  }
+}
+
+bool CompactorService::AddCustomFolder(const std::wstring &folderPath) {
+  if (folderPath.empty()) return false;
+  DWORD attr = GetFileAttributesW(folderPath.c_str());
+  if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+    return false;
+  }
+
+  // Check if already in config
+  auto &cfg = FanService::Get().GetOverlayConfig();
+  for (const auto &f : cfg.customGameFolders) {
+    if (_wcsicmp(f.c_str(), folderPath.c_str()) == 0) {
+      return false; // Already tracked
+    }
+  }
+
+  cfg.customGameFolders.push_back(folderPath);
+  FanService::Get().SaveConfig();
+
+  // Create entry, analyze and append to games list immediately
+  GameEntry entry;
+  entry.id = folderPath;
+  size_t lastSlash = folderPath.find_last_of(L"\\/");
+  if (lastSlash != std::wstring::npos && lastSlash + 1 < folderPath.size()) {
+    entry.title = folderPath.substr(lastSlash + 1);
+  } else {
+    entry.title = folderPath;
+  }
+  entry.installPath = folderPath;
+  entry.launcher = L"Custom";
+  entry.hasDirectStorage = CheckUsesDirectStorage(entry.installPath);
+  MeasureDirectorySizesFast(entry);
+  AnalyzeGameWorthiness(entry);
+
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (const auto &g : m_games) {
+      if (_wcsicmp(g.installPath.c_str(), folderPath.c_str()) == 0) {
+        return true;
+      }
+    }
+    m_games.push_back(entry);
+    std::sort(m_games.begin(), m_games.end(), [](const GameEntry &a, const GameEntry &b) {
+      return a.title < b.title;
+    });
+  }
+
+  return true;
+}
+
 void CompactorService::CalculateDirectorySizesRecursive(const std::wstring &dir,
                                                         uint64_t &outLogical,
                                                         uint64_t &outPhysical) {
@@ -560,7 +674,7 @@ void CompactorService::AnalyzeGameWorthiness(GameEntry &entry) {
   if (entry.hasDirectStorage) {
     entry.rating = CompressibilityRating::Low;
     if (entry.state == GameCompactionState::Compacted) {
-      entry.analysisNote = L"\u26A0 DirectStorage: Already Compacted (BypassIO Disabled)";
+      entry.analysisNote = L"\u26A0 DirectStorage: Compacted (Decompaction recommended)";
     } else {
       entry.analysisNote = L"\u26A0 DirectStorage: Compaction Not Recommended (BypassIO)";
     }
@@ -614,13 +728,13 @@ void CompactorService::AnalyzeGameWorthiness(GameEntry &entry) {
   uint64_t totalSample = mediaBytes + rawBytes;
   if (totalSample > 0 && (double)mediaBytes / (double)totalSample > 0.70) {
     entry.rating = CompressibilityRating::Low;
-    entry.analysisNote = L"Low (~5-10%, pre-compressed assets)";
+    entry.analysisNote = L"Expected: Low";
   } else if (totalSample > 0 && (double)rawBytes / (double)totalSample > 0.60) {
     entry.rating = CompressibilityRating::High;
-    entry.analysisNote = L"High (~25-45% savings expected)";
+    entry.analysisNote = L"Expected: High";
   } else {
     entry.rating = CompressibilityRating::Moderate;
-    entry.analysisNote = L"Moderate (~15-25% savings expected)";
+    entry.analysisNote = L"Expected: Mid";
   }
 }
 
@@ -658,16 +772,24 @@ void CompactorService::StartDecompact(size_t index) {
 void CompactorService::StartCompactAll(CompactAlgo algo) {
   if (m_isBusy.load()) return;
   m_algo = algo;
+  size_t dsSkipped = 0;
   {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_queue.clear();
     for (size_t i = 0; i < m_games.size(); i++) {
-      if (m_games[i].state != GameCompactionState::Compacted && !m_games[i].hasDirectStorage) {
+      if (m_games[i].hasDirectStorage) {
+        dsSkipped++;
+        continue;
+      }
+      if (m_games[i].state != GameCompactionState::Compacted) {
         m_queue.push_back(i);
         m_games[i].state = GameCompactionState::InQueue;
       }
     }
   }
+
+  OmenLog("[AMDOMEN] StartCompactAll: %zu games queued (%zu DirectStorage games skipped/protected)\n",
+          m_queue.size(), dsSkipped);
 
   if (m_queue.empty()) return;
 
@@ -752,6 +874,7 @@ void CompactorService::CompactionWorker() {
           }
         } else {
           // Precise fallback: recursive physical cluster calculation
+          onProgress(99.0f, L"Finalizing & verifying sizes...");
           uint64_t logSz = 0, physSz = 0;
           CalculateDirectorySizesRecursive(m_games[idx].installPath, logSz, physSz);
           if (logSz > 0) {
@@ -840,11 +963,25 @@ bool CompactorService::RunCompactCommand(const std::wstring &path, bool decompac
   auto processLine = [&](const std::string &line) {
     if (line.empty()) return;
 
-    // Check for directory listing: " Listing D:\SteamLibrary\..."
-    size_t listPos = line.find("Listing ");
+    // Check for directory listing: "Compressing files in ...", "Uncompressing files in ...", or "Listing ..."
+    size_t prefixLen = 0;
+    size_t listPos = line.find("Compressing files in ");
     if (listPos != std::string::npos) {
-      std::string dir = line.substr(listPos + 8);
-      while (!dir.empty() && (dir.back() == '\r' || dir.back() == '\n' || dir.back() == ' ')) dir.pop_back();
+      prefixLen = 21;
+    } else {
+      listPos = line.find("Uncompressing files in ");
+      if (listPos != std::string::npos) {
+        prefixLen = 23;
+      } else {
+        listPos = line.find("Listing ");
+        if (listPos != std::string::npos) {
+          prefixLen = 8;
+        }
+      }
+    }
+    if (listPos != std::string::npos) {
+      std::string dir = line.substr(listPos + prefixLen);
+      while (!dir.empty() && (dir.back() == '\r' || dir.back() == '\n' || dir.back() == ' ' || dir.back() == '\\' || dir.back() == '/')) dir.pop_back();
       size_t lastSlash = dir.find_last_of("\\/");
       if (lastSlash != std::string::npos) {
         std::string sub = dir.substr(lastSlash + 1);
@@ -858,28 +995,31 @@ bool CompactorService::RunCompactCommand(const std::wstring &path, bool decompac
       }
     }
 
-    // Check for completed file line: " 127863296 : 46821376 = 2.7 to 1 l CURE2-Win64-Shipping.exe"
+    // Check for completed file line: "dummy.txt 6000 : 4096 = 1.5 to 1 [OK]"
     size_t colon = line.find(':');
     size_t eq = line.find('=', colon != std::string::npos ? colon : 0);
     if (colon != std::string::npos && eq != std::string::npos && colon < eq) {
-      std::string num1Str;
-      for (char ch : line.substr(0, colon)) {
-        if (isdigit(static_cast<unsigned char>(ch))) num1Str += ch;
+      std::string beforeColon = line.substr(0, colon);
+      while (!beforeColon.empty() && isspace(static_cast<unsigned char>(beforeColon.back()))) {
+        beforeColon.pop_back();
       }
-      size_t to1 = line.find("to 1", eq);
-      if (to1 != std::string::npos) {
-        size_t nameStart = to1 + 4;
-        while (nameStart < line.size() && (line[nameStart] == ' ' || line[nameStart] == 'l' || line[nameStart] == 'x' || line[nameStart] == 'c')) {
-          nameStart++;
-        }
-        std::string fn = line.substr(nameStart);
-        while (!fn.empty() && (fn.back() == '\r' || fn.back() == '\n' || fn.back() == ' ')) fn.pop_back();
-        if (!fn.empty()) {
-          int wlen = MultiByteToWideChar(CP_UTF8, 0, fn.c_str(), -1, nullptr, 0);
-          if (wlen > 0) {
-            currentFileName.resize(wlen - 1);
-            MultiByteToWideChar(CP_UTF8, 0, fn.c_str(), -1, &currentFileName[0], wlen);
-          }
+      std::string num1Str;
+      while (!beforeColon.empty() && isdigit(static_cast<unsigned char>(beforeColon.back()))) {
+        num1Str.insert(num1Str.begin(), beforeColon.back());
+        beforeColon.pop_back();
+      }
+      while (!beforeColon.empty() && isspace(static_cast<unsigned char>(beforeColon.back()))) {
+        beforeColon.pop_back();
+      }
+      size_t firstNonSpace = beforeColon.find_first_not_of(" \t\r\n");
+      if (firstNonSpace != std::string::npos) {
+        beforeColon = beforeColon.substr(firstNonSpace);
+      }
+      if (!beforeColon.empty()) {
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, beforeColon.c_str(), -1, nullptr, 0);
+        if (wlen > 0) {
+          currentFileName.resize(wlen - 1);
+          MultiByteToWideChar(CP_UTF8, 0, beforeColon.c_str(), -1, &currentFileName[0], wlen);
         }
       }
 
@@ -888,7 +1028,7 @@ bool CompactorService::RunCompactCommand(const std::wstring &path, bool decompac
           uint64_t uncomp = std::stoull(num1Str);
           processedUncompBytes += uncomp;
           if (totalUncompressedBytes > 0) {
-            baseProgress = std::min(95.0f, (float)((double)processedUncompBytes / (double)totalUncompressedBytes * 95.0));
+            baseProgress = std::min(98.0f, (float)((double)processedUncompBytes / (double)totalUncompressedBytes * 98.0));
           }
           heartbeatElapsedMs = 0;
           if (onProgress) onProgress(baseProgress, currentFileName);
@@ -914,6 +1054,9 @@ bool CompactorService::RunCompactCommand(const std::wstring &path, bool decompac
           outCompressed = std::stoull(cStr);
         } catch (...) {}
       }
+      baseProgress = 99.0f;
+      currentFileName = L"Finalizing & verifying sizes...";
+      if (onProgress) onProgress(baseProgress, currentFileName);
     }
   };
 
@@ -956,7 +1099,7 @@ bool CompactorService::RunCompactCommand(const std::wstring &path, bool decompac
       heartbeatElapsedMs += 100;
       if (onProgress) {
         float factor = 1.0f - std::exp(-heartbeatElapsedMs / 45000.0f);
-        float heartbeatPct = std::min(96.0f, baseProgress + (96.0f - baseProgress) * factor);
+        float heartbeatPct = std::min(98.0f, baseProgress + (98.0f - baseProgress) * factor);
         onProgress(heartbeatPct, currentFileName);
       }
     }

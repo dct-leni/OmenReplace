@@ -121,21 +121,7 @@ bool OmenEc::WaitEcInputEmpty() {
   return false;
 }
 
-bool OmenEc::WaitEcOutputFull() {
-  auto start = std::chrono::steady_clock::now();
-  for (int i = 0; i < 200; i++) {
-    if ((ReadPort(0x66) & 0x01) == 1)
-      return true;
-    if (std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - start)
-            .count() > 150)
-      return false;
-    std::this_thread::sleep_for(std::chrono::microseconds(100));
-  }
-  return false;
-}
-
- uint8_t OmenEc::ReadByte(uint8_t offset) {
+uint8_t OmenEc::ReadByte(uint8_t offset) {
   for (int retry = 0; retry < 3; retry++) {
     if (!LockEc()) {
       Sleep(1);
@@ -156,31 +142,6 @@ bool OmenEc::WaitEcOutputFull() {
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
   return 0;
-}
-
-uint16_t OmenEc::ReadWord(uint8_t offset_l, uint8_t offset_h) {
-  if (!LockEc())
-    return 0;
-
-  auto readInternal = [&](uint8_t offset) -> uint8_t {
-    uint8_t res = 0;
-    if (WaitEcInputEmpty()) {
-      WritePort(0x66, 0x80);
-      if (WaitEcInputEmpty()) {
-        WritePort(0x62, offset);
-        // Direct read (this EC doesn't set OBF)
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        res = ReadPort(0x62);
-      }
-    }
-    return res;
-  };
-
-  uint8_t l = readInternal(offset_l);
-  uint8_t h = readInternal(offset_h);
-
-  UnlockEc();
-  return (uint16_t)((h << 8) | l);
 }
 
 void OmenEc::WriteByte(uint8_t offset, uint8_t value) {
@@ -212,8 +173,6 @@ float OmenEc::GetFan2Speed() {
     return duty * 58.0f;
   return 0.0f;
 }
-float OmenEc::GetFan1Percentage() { return (float)ReadByte(EC_XGS1); }
-float OmenEc::GetFan2Percentage() { return (float)ReadByte(EC_XGS2); }
 
 float OmenEc::GetCpuTemp57() { return (float)ReadByte(EC_CPUT); }
 float OmenEc::GetCpuTemp58() { return (float)ReadByte(EC_RTMP); }
@@ -335,30 +294,6 @@ void OmenEc::SetFanSpeedPercent(int fanIndex, int percent) {
 
   WriteByte(EC_OMCC, 0x06); 
   WriteByte(EC_XFCD, 0x1E); 
-}
-
-bool OmenEc::PciWriteDword(uint8_t bus, uint8_t dev, uint8_t func, uint32_t reg, uint32_t val) {
-  if (!m_smuPawn) return false;
-  // Fallback to SMU aperture if it's the SMU registers we're talking to
-  if (bus == 0 && dev == 0 && func == 0 && (reg == 0xC4 || reg == 0xC8)) {
-     std::vector<uint64_t> in = { (uint64_t)reg, (uint64_t)val };
-     std::vector<uint64_t> out;
-     return m_smuPawn->Execute("ioctl_write_smu_register", in, out);
-  }
-  return false;
-}
-
-bool OmenEc::PciReadDword(uint8_t bus, uint8_t dev, uint8_t func, uint32_t reg, uint32_t& val) {
-  if (!m_smuPawn) return false;
-  if (bus == 0 && dev == 0 && func == 0 && (reg == 0xC4 || reg == 0xC8)) {
-     std::vector<uint64_t> in = { (uint64_t)reg };
-     std::vector<uint64_t> out(1);
-     if (m_smuPawn->Execute("ioctl_read_smu_register", in, out)) {
-       val = (uint32_t)out[0];
-       return true;
-     }
-  }
-  return false;
 }
 
 bool OmenEc::SmuReadReg(uint32_t smnAddr, uint32_t& val) {

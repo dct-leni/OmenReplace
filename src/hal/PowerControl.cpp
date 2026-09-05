@@ -563,47 +563,6 @@ bool PowerControl::SetBatteryChargeLimit(int limitPercent) {
   return ok;
 }
 
-bool PowerControl::GetDisplayOverdrive() {
-  auto &oc = FanService::Get().GetOverlayConfig();
-  return oc.displayOverdrive;
-}
-
-bool PowerControl::ReadHardwareDisplayOverdrive() {
-  WmiHelper wmi;
-  if (!wmi.Initialize()) return m_displayOverdrive;
-
-  uint8_t data[4] = {0};
-  std::vector<uint8_t> out;
-  // CMD_OVERDRIVE_GET = 0x35
-  if (wmi.ExecuteHpBiosMethod(0x20008, 0x35, data, 4, out, 4) && !out.empty()) {
-    bool enabled = (out[0] != 0);
-    m_displayOverdrive = enabled;
-    return enabled;
-  }
-  return m_displayOverdrive;
-}
-
-bool PowerControl::SetDisplayOverdrive(bool enable) {
-  auto &oc = FanService::Get().GetOverlayConfig();
-  oc.displayOverdrive = enable;
-  FanService::Get().SaveConfig();
-
-  if (m_displayOverdrive == enable) {
-    return true; // Already applied in hardware; skip redundant WMI 0x36 TCON reset
-  }
-  m_displayOverdrive = enable;
-
-  uint8_t data[4] = {(uint8_t)(enable ? 1 : 0), 0, 0, 0};
-  WmiHelper wmi;
-  if (!wmi.Initialize()) return false;
-  std::vector<uint8_t> out;
-  // CMD_OVERDRIVE_SET = 0x36
-  bool ok = wmi.ExecuteHpBiosMethod(0x20008, 0x36, data, 4, out, 0);
-  OmenLog("[AMDOMEN] SetDisplayOverdrive(%s) -> WMI 0x36 result=%s\n",
-          enable ? "ON" : "OFF", ok ? "OK" : "FAILED");
-  return ok;
-}
-
 void PowerControl::RestoreFanAuto() {
   // 1. Disable Max Fan via BIOS method 0x27
   m_maxFanActive = false;
@@ -667,17 +626,6 @@ bool PowerControl::SetAmdAllPptLimits(int fastW, int slowW, int stapmW) {
   if (ec.SendMp1Command(0x4F, argsStapm)) anyOk = true;
 
   return anyOk;
-}
-
-void PowerControl::SetCpuBoostMode(int boostMode) {
-  // Boost modes: 0=Disabled, 1=Enabled, 2=Aggressive, 3=Efficient Enabled, 4=Efficient Aggressive
-  GUID *activeScheme = nullptr;
-  if (PowerGetActiveScheme(NULL, &activeScheme) == ERROR_SUCCESS && activeScheme) {
-    PowerWriteACValueIndex(NULL, activeScheme, &GUID_PROCESSOR_SETTINGS_SUBGROUP, &GUID_PERFBOOST, (DWORD)boostMode);
-    PowerWriteDCValueIndex(NULL, activeScheme, &GUID_PROCESSOR_SETTINGS_SUBGROUP, &GUID_PERFBOOST, (DWORD)boostMode);
-    PowerSetActiveScheme(NULL, activeScheme);
-    LocalFree(activeScheme);
-  }
 }
 
 static void SetEppPreference(DWORD eppVal) {
@@ -891,10 +839,7 @@ std::string PowerControl::GetGpuModeStr() {
   }
 }
 
-// CPU Undervolting: AMD-only (Intel MSR 0x150 not supported)
-int PowerControl::GetCpuCoreOffset() { return 0; }
-int PowerControl::GetCpuCacheOffset() { return 0; }
-bool PowerControl::SetCpuUndervolt(int, int) { return false; }
+// AMD Curve Optimizer (Dragon Range / Raphael)
 bool PowerControl::SetAmdCurveOptimizer(int coCounts) {
   // Safety clamp: -30 to +30
   int counts = coCounts;
@@ -1027,51 +972,3 @@ float PowerControl::GetCpuVoltage() {
   return std::max(0.85f, std::min(1.45f, baseVid + coOffsetV));
 }
 
-// ─── Low-Latency Network & OS Gaming Tweak ───────────────────────────────────
-// HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile
-// NetworkThrottlingIndex: 0xFFFFFFFF (disable packet throttling) vs 10 (default)
-// SystemResponsiveness: 0 (0% CPU reserved for background) vs 20 (default)
-bool PowerControl::GetNetworkGamingTweak() {
-  if (m_netGamingCached >= 0)
-    return m_netGamingCached == 1;
-
-  HKEY hKey = NULL;
-  bool isTweaked = false;
-  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                    L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile",
-                    0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-    DWORD netVal = 0;
-    DWORD size = sizeof(DWORD);
-    DWORD type = REG_DWORD;
-    if (RegQueryValueExW(hKey, L"NetworkThrottlingIndex", nullptr, &type, (LPBYTE)&netVal, &size) == ERROR_SUCCESS) {
-      if (netVal == 0xFFFFFFFF) isTweaked = true;
-    }
-    RegCloseKey(hKey);
-  }
-  m_netGamingCached = isTweaked ? 1 : 0;
-  return isTweaked;
-}
-
-bool PowerControl::SetNetworkGamingTweak(bool enable) {
-  HKEY hKey = NULL;
-  bool ok = false;
-  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                    L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile",
-                    0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
-    DWORD netVal = enable ? 0xFFFFFFFF : 0x0000000A;
-    DWORD respVal = enable ? 0 : 20;
-    RegSetValueExW(hKey, L"NetworkThrottlingIndex", 0, REG_DWORD, (const BYTE *)&netVal, sizeof(netVal));
-    RegSetValueExW(hKey, L"SystemResponsiveness", 0, REG_DWORD, (const BYTE *)&respVal, sizeof(respVal));
-    RegCloseKey(hKey);
-    ok = true;
-  }
-
-  auto &cfg = FanService::Get().GetOverlayConfig();
-  cfg.lowLatencyNetwork = enable;
-  FanService::Get().SaveConfig();
-
-  m_netGamingCached = enable ? 1 : 0;
-  OmenLog("[AMDOMEN] SetNetworkGamingTweak(%d): NetworkThrottlingIndex=%s, SystemResponsiveness=%s\n",
-          enable ? 1 : 0, enable ? "0xFFFFFFFF" : "10", enable ? "0" : "20");
-  return ok;
-}

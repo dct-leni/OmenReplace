@@ -31,7 +31,7 @@
 
 namespace {
 constexpr int kWidth = 306;
-constexpr int kHeight = 670;
+constexpr int kHeight = 622;
 constexpr int kCardPad = 8;
 constexpr int kRowH = 22;
 
@@ -724,8 +724,8 @@ void MainWindowWin32::OnLButtonDown(int x, int y) {
     InvalidateRect(m_hwnd, nullptr, FALSE);
     return;
   }
-  // Checkboxes / Toggle Switches: battery, autostart, minimize, showhud,
-  // passive, api, wol, autopower, gameauto, overdrive, wlanbt, netgaming.
+  // Switches: battery, autostart, minimize, showhud,
+  // passthrough, api, wol, autopower, gameauto, wlanbt.
   for (int i = 0; i < 12; i++) {
     if (x >= m_chk[i][2] && x <= m_chk[i][3] && y >= m_chk[i][0] &&
         y <= m_chk[i][1]) {
@@ -794,21 +794,10 @@ void MainWindowWin32::OnLButtonDown(int x, int y) {
         FanService::Get().SaveConfig();
         break;
       }
-      case 9: {
-        bool cur = OmenHal::Get().GetDisplayOverdrive();
-        OmenHal::Get().SetDisplayOverdrive(!cur);
-        break;
-      }
       case 10: {
         // Wake on WLAN/BT — toggle Wireless & Bluetooth wake.
         bool cur = PowerControl::Get().GetWakeOnWlanBt();
         PowerControl::Get().SetWakeOnWlanBt(!cur);
-        break;
-      }
-      case 11: {
-        // Low-Latency Network & OS Gaming Tweak
-        bool cur = PowerControl::Get().GetNetworkGamingTweak();
-        PowerControl::Get().SetNetworkGamingTweak(!cur);
         break;
       }
       }
@@ -1353,11 +1342,9 @@ void MainWindowWin32::OnPaint(HDC hdc) {
     // --- Hardware & Power Section ---
     sectionHeader(L"HARDWARE & POWER");
     singleRowSwitch(L"80% Battery Charge Limit", OmenHal::Get().GetBatteryChargeLimit() <= 80, 0);
-    singleRowSwitch(L"Display Panel Overdrive", OmenHal::Get().GetDisplayOverdrive(), 9);
     singleRowSwitch(L"Wake on LAN (Ethernet S4/S5)", PowerControl::Get().GetWakeOnLan(), 6);
     singleRowSwitch(L"Wake on WLAN & Bluetooth", PowerControl::Get().GetWakeOnWlanBt(), 10);
     singleRowSwitch(L"Auto Power on AC / Battery", FanService::Get().GetOverlayConfig().autoPowerSwitch, 7);
-    singleRowSwitch(L"Low-Latency Network Tweak", PowerControl::Get().GetNetworkGamingTweak(), 11);
 
     y += 4;
 

@@ -23,10 +23,7 @@ public:
   }
   void RequestGpuMode(int mode);
 
-  // CPU Undervolting
-  int GetCpuCoreOffset();
-  int GetCpuCacheOffset();
-  bool SetCpuUndervolt(int coreMv, int cacheMv);
+  // AMD Curve Optimizer (Dragon Range / Raphael)
   int GetAmdCurveOptimizer();  // Read current all-core CO value from SMU
   bool SetAmdCurveOptimizer(int coCounts);
   int GetCachedAmdCurveOptimizer() { return m_amdCurveOptimizer; }
@@ -52,11 +49,6 @@ public:
   // Battery Care
   int GetBatteryChargeLimit();
   bool SetBatteryChargeLimit(int limitPercent);
-
-  // Display Panel Overdrive (LCD Response Time Optimization)
-  bool GetDisplayOverdrive();
-  bool SetDisplayOverdrive(bool enable);
-  bool ReadHardwareDisplayOverdrive();
 
   // GPU MUX startup probe (WMI 0x52; only changes on reboot, no need to poll)
   void InitGpuMux();
@@ -88,10 +80,6 @@ public:
   bool GetWakeOnWlanBt();
   bool SetWakeOnWlanBt(bool enable);
 
-  // Low-Latency Network & OS Gaming Tweak (NetworkThrottlingIndex = 0xFFFFFFFF, SystemResponsiveness = 0)
-  bool GetNetworkGamingTweak();
-  bool SetNetworkGamingTweak(bool enable);
-
   // AC-line auto-switch: on battery → Eco+Quiet (saving current state),
   // on AC → restore. Call periodically from the worker loop.
   void CheckAcLine();
@@ -105,24 +93,21 @@ public:
   bool GetSystemRamUsage(float &usedGb, float &totalGb, float &pct);
   float GetCpuVoltage();
 
-  // Windows Power Plan & CPU Boost
-  void SetCpuBoostMode(int boostMode);
-
   bool SetFanLevelWmi(int cpuPercent, int gpuPercent); // WMI Method 0x2E
   bool SetFanLevelWmiBg(
       int cpuPercent,
       int gpuPercent); // Background thread version (uses persistent WMI)
-  bool SetFanMax(bool enabled); // WMI Method 0x27 (Max Fan Trigger)
 
 private:
   PowerControl();
+
+  bool SetFanMax(bool enabled); // Internal WMI Method 0x27 (Max Fan Trigger)
 
   std::mutex m_mutex;
   PowerMode m_currentMode = PowerMode::Balanced;
   bool m_maxFanActive = false;
   int m_gpuMode = -1; // 0=Hybrid, 1=Discrete, 2=Optimus
   int m_batteryLimitPercent = 100; // Cached battery threshold (WMI only knows on/off)
-  bool m_displayOverdrive = true;  // Cached display overdrive
   int m_amdCurveOptimizer = 0;
   int m_gpuPowerOverride = -1; // -1=Auto, 0..2=Min/Med/Max TGP override
 
@@ -136,7 +121,6 @@ private:
   // Wake cached state (refreshed at startup + after toggle)
   int m_wolCached = -1; // -1 unknown, 0 off, 1 on
   int m_wlanBtWolCached = -1; // -1 unknown, 0 off, 1 on
-  int m_netGamingCached = -1; // -1 unknown, 0 off, 1 on
 
   // WMI HP BIOS Helper
   bool CallHpBios(uint32_t cmd, uint32_t type, uint8_t *data, size_t size,
