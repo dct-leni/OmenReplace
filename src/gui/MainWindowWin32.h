@@ -36,12 +36,13 @@ private:
   int m_coTrackX0, m_coTrackX1, m_coTrackY;
   int m_opacityTrackX0, m_opacityTrackX1, m_opacityTrackY;
   int m_btnFlush[4];
+  int m_btnCompact[4];
   int m_btnCoMinus[4]; // [y0,y1,x0,x1]
   int m_btnCoPlus[4];  // [y0,y1,x0,x1]
   int m_tctlPill[4][4]; // Auto | 95 | 90 | 85
   // [slot][y0,y1,x0,x1]: battery, autostart, minimize, showhud, passive, api,
-  // wol, autopower, gameauto, overdrive, wlanbt
-  int m_chk[12][4];
+  // wol, autopower, gameauto, overdrive, wlanbt, netgaming
+  int m_chk[13][4];
 
   void UpdateWindowHeight();
 

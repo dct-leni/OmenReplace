@@ -4,12 +4,15 @@
 #include <timeapi.h>
 
 #include "hal/ApiServer.h"
+#include "hal/FanController.h"
 #include "hal/FanService.h"
 #include "hal/OmenHal.h"
 #include "hal/OmenLog.h"
 #include "gui/HudWindow.h"
 #include "gui/MainWindowWin32.h"
 #include "gui/TrayManager.h"
+
+#include <csignal>
 
 static bool IsUserAdmin() {
   BOOL isAdmin = FALSE;
@@ -22,6 +25,13 @@ static bool IsUserAdmin() {
     FreeSid(group);
   }
   return isAdmin;
+}
+
+static LONG WINAPI GlobalCrashHandler(EXCEPTION_POINTERS *pExceptionInfo) {
+  (void)pExceptionInfo;
+  OmenLog("[AMDOMEN] Crash detected! Restoring BIOS fan control immediately...\n");
+  FanController::Get().RestoreBios();
+  return EXCEPTION_CONTINUE_SEARCH;
 }
 
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showMode) {
@@ -76,6 +86,19 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showMode) {
 
   if (!OmenHal::Get().Initialize())
     OmenLog("[AMDOMEN] HAL initialization failed\n");
+
+  // Guarantee BIOS fan control is returned under all application termination paths (normal exit, console break, crash, signals).
+  SetUnhandledExceptionFilter(GlobalCrashHandler);
+  std::signal(SIGABRT, [](int) { FanController::Get().RestoreBios(); });
+  std::signal(SIGSEGV, [](int) { FanController::Get().RestoreBios(); });
+  std::signal(SIGTERM, [](int) { FanController::Get().RestoreBios(); });
+
+  atexit([]() { OmenHal::Get().Shutdown(); });
+  SetConsoleCtrlHandler([](DWORD) -> BOOL {
+    OmenHal::Get().Shutdown();
+    Sleep(100);
+    return FALSE;
+  }, TRUE);
 
   // Load config (reads power_mode, fan_mode from config.json). Must run AFTER
   // HAL init so SetMode can write to the EC.

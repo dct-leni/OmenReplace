@@ -106,6 +106,36 @@ void TrayManager::SetupIcon(HWND hwnd) {
     SetTimer(hwnd, 101, 1500, nullptr);
   } else {
     KillTimer(hwnd, 101);
+    UpdateTooltip(hwnd);
+    SetTimer(hwnd, 102, 2000, nullptr);
+  }
+}
+
+void TrayManager::UpdateTooltip(HWND hwnd) {
+  if (!m_nid.hWnd) return;
+  float cpuT = OmenHal::Get().GetCpuTemp();
+  float gpuT = OmenHal::Get().GetGpuTemp();
+  if (gpuT > 120.0f) gpuT = 0.0f;
+  float fan1 = OmenHal::Get().GetFanSpeed(0);
+  float fan2 = OmenHal::Get().GetFanSpeed(1);
+  int fanRpm = (int)((std::max)(fan1, fan2));
+
+  wchar_t tipBuf[128];
+  if (gpuT > 0.0f) {
+    std::swprintf(tipBuf, sizeof(tipBuf) / sizeof(wchar_t),
+                  L"AMDOMEN | CPU: %.0f\u00B0C | GPU: %.0f\u00B0C | %d RPM",
+                  cpuT, gpuT, fanRpm);
+  } else {
+    std::swprintf(tipBuf, sizeof(tipBuf) / sizeof(wchar_t),
+                  L"AMDOMEN | CPU: %.0f\u00B0C | GPU: Sleep | %d RPM",
+                  cpuT, fanRpm);
+  }
+
+  // Only update if text changed
+  if (wcscmp(m_nid.szTip, tipBuf) != 0) {
+    wcscpy_s(m_nid.szTip, tipBuf);
+    m_nid.uFlags = NIF_TIP;
+    Shell_NotifyIconW(NIM_MODIFY, &m_nid);
   }
 }
 
@@ -128,6 +158,10 @@ LRESULT CALLBACK TrayManager::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
   }
   if (msg == WM_TIMER && wParam == 101) {
     if (self) self->SetupIcon(hwnd);
+    return 0;
+  }
+  if (msg == WM_TIMER && wParam == 102) {
+    if (self) self->UpdateTooltip(hwnd);
     return 0;
   }
   if (s_uTaskbarRestart != 0 && msg == s_uTaskbarRestart) {
@@ -189,8 +223,6 @@ void TrayManager::HandleMenu(HWND hwnd) {
               IDM_TRAY_PM_BALANCED, L"Balanced");
   AppendMenuW(pmMenu, MF_STRING | (pm == 2 ? MF_CHECKED : MF_UNCHECKED),
               IDM_TRAY_PM_PERF, L"Performance");
-  AppendMenuW(pmMenu, MF_STRING | (pm == 3 ? MF_CHECKED : MF_UNCHECKED),
-              IDM_TRAY_PM_TURBO, L"Turbo");
   AppendMenuW(menu, MF_POPUP, (UINT_PTR)pmMenu, L"Power Mode");
 
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -235,9 +267,6 @@ void TrayManager::HandleMenu(HWND hwnd) {
     break;
   case IDM_TRAY_PM_PERF:
     OmenHal::Get().SetPowerMode(2);
-    break;
-  case IDM_TRAY_PM_TURBO:
-    OmenHal::Get().SetPowerMode(3);
     break;
   case IDM_TRAY_EXIT: {
     HWND main = FindWindowW(L"AMDOMEN_MAIN_WIN32", nullptr);

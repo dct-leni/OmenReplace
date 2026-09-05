@@ -71,12 +71,16 @@ public:
   bool GetIsAnotherFanControllerActive();
 
   // Power/Performance
-  void SetPowerMode(int mode); // 0=Eco, 1=Balanced, 2=Performance, 3=Turbo
+  void SetPowerMode(int mode); // 0=Eco, 1=Balanced, 2=Performance
   int GetPowerMode();
   std::string GetGpuModeStr();
   int GetGpuModeInt();
   void RequestGpuMode(int mode);
   void OptimizeMemory();
+
+  // Network & Gaming Latency Tweak
+  bool GetNetworkGamingTweak();
+  bool SetNetworkGamingTweak(bool enable);
 
 private:
   OmenHal();

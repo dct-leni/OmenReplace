@@ -45,6 +45,7 @@ private:
   float m_cpuLoad = 0.0f;
   float m_gpuLoad = 0.0f;
   float m_ramLoad = 0.0f;
+  float m_ramTemp = 0.0f;
   bool m_passthrough = false;
   bool m_styled = false;
 };

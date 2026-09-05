@@ -43,6 +43,7 @@ if errorlevel 1 (
 
 echo.
 echo Building...
+taskkill /f /im AMDOMEN.exe >nul 2>&1
 cmake --build "%ROOT%\build" --config Release
 if errorlevel 1 (
   echo Build failed.

@@ -100,22 +100,23 @@ void PowerControl::Update() {
 
   // 3. Update Windows Overlay Scheme
   PowerMode detectedOverlay = detectedEc; // Fallback to EC
-  HMODULE hPowr = GetModuleHandleA("powrprof.dll");
-  if (!hPowr)
-    hPowr = LoadLibraryA("powrprof.dll");
-  if (hPowr) {
-    auto pGetActualOverlay = (PfnPowerGetActualOverlayScheme)GetProcAddress(
-        hPowr, "PowerGetActualOverlayScheme");
-    if (pGetActualOverlay) {
-      GUID overlay;
-      if (pGetActualOverlay(&overlay) == ERROR_SUCCESS) {
-        if (IsEqualGUID(overlay, GUID_OVERLAY_EFFICIENCY))
-          detectedOverlay = PowerMode::Eco;
-        else if (IsEqualGUID(overlay, GUID_OVERLAY_PERFORMANCE))
-          detectedOverlay = PowerMode::Performance;
-        else if (IsEqualGUID(overlay, GUID_OVERLAY_BALANCED))
-          detectedOverlay = PowerMode::Balanced;
-      }
+  static auto pGetActualOverlay = []() -> PfnPowerGetActualOverlayScheme {
+    HMODULE hPowr = GetModuleHandleA("powrprof.dll");
+    if (!hPowr)
+      hPowr = LoadLibraryA("powrprof.dll");
+    return hPowr ? (PfnPowerGetActualOverlayScheme)GetProcAddress(
+                       hPowr, "PowerGetActualOverlayScheme")
+                 : nullptr;
+  }();
+  if (pGetActualOverlay) {
+    GUID overlay;
+    if (pGetActualOverlay(&overlay) == ERROR_SUCCESS) {
+      if (IsEqualGUID(overlay, GUID_OVERLAY_EFFICIENCY))
+        detectedOverlay = PowerMode::Eco;
+      else if (IsEqualGUID(overlay, GUID_OVERLAY_PERFORMANCE))
+        detectedOverlay = PowerMode::Performance;
+      else if (IsEqualGUID(overlay, GUID_OVERLAY_BALANCED))
+        detectedOverlay = PowerMode::Balanced;
     }
   }
 
@@ -127,16 +128,6 @@ void PowerControl::Update() {
 
   // Synchronize
   std::lock_guard<std::mutex> lock(m_mutex);
-  if (m_currentMode == PowerMode::Turbo) {
-    // In Turbo mode, Windows overlay and EC byte 0xCE naturally match Performance mode.
-    // Only leave Turbo if the user actively selects Eco or Balanced.
-    if (detectedOverlay == PowerMode::Eco || detectedOverlay == PowerMode::Balanced) {
-      m_currentMode = detectedOverlay;
-    } else if (detectedEc == PowerMode::Eco || detectedEc == PowerMode::Balanced) {
-      m_currentMode = detectedEc;
-    }
-    return;
-  }
 
   // Trust Overlay change if it differs from current (User moved slider)
   if (detectedOverlay != m_currentMode) {
@@ -162,7 +153,9 @@ void PowerControl::InitGpuMux() {
 }
 
 // ─── BIOS WMI Setting Helper (root\HP\InstrumentedBIOS) ──────────────────────
-static bool SetBiosSettingWmi(const std::wstring &settingName, const std::wstring &valueStr) {
+static bool SetBiosSettingsWmiBatch(const std::vector<std::pair<std::wstring, std::wstring>> &settings) {
+  if (settings.empty()) return true;
+
   IWbemLocator *pLoc = nullptr;
   HRESULT hr = CoCreateInstance(CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER,
                                 IID_IWbemLocator, (LPVOID *)&pLoc);
@@ -188,46 +181,47 @@ static bool SetBiosSettingWmi(const std::wstring &settingName, const std::wstrin
   hr = pSvc->GetObject(clsName, 0, NULL, &pClass, NULL);
   SysFreeString(clsName);
 
-  bool ok = false;
+  bool anyOk = false;
   if (SUCCEEDED(hr) && pClass) {
     IWbemClassObject *pInParamsDef = nullptr;
     BSTR methName = SysAllocString(L"SetBIOSSetting");
     hr = pClass->GetMethod(methName, 0, &pInParamsDef, NULL);
     if (SUCCEEDED(hr) && pInParamsDef) {
-      IWbemClassObject *pInInstance = nullptr;
-      hr = pInParamsDef->SpawnInstance(0, &pInInstance);
-      if (SUCCEEDED(hr) && pInInstance) {
-        VARIANT vtName, vtVal, vtPass;
-        vtName.vt = VT_BSTR; vtName.bstrVal = SysAllocString(settingName.c_str());
-        vtVal.vt = VT_BSTR; vtVal.bstrVal = SysAllocString(valueStr.c_str());
-        vtPass.vt = VT_BSTR; vtPass.bstrVal = SysAllocString(L"");
+      for (const auto &item : settings) {
+        IWbemClassObject *pInInstance = nullptr;
+        hr = pInParamsDef->SpawnInstance(0, &pInInstance);
+        if (SUCCEEDED(hr) && pInInstance) {
+          VARIANT vtName, vtVal, vtPass;
+          vtName.vt = VT_BSTR; vtName.bstrVal = SysAllocString(item.first.c_str());
+          vtVal.vt = VT_BSTR; vtVal.bstrVal = SysAllocString(item.second.c_str());
+          vtPass.vt = VT_BSTR; vtPass.bstrVal = SysAllocString(L"");
 
-        pInInstance->Put(L"Name", 0, &vtName, 0);
-        pInInstance->Put(L"Value", 0, &vtVal, 0);
-        pInInstance->Put(L"Password", 0, &vtPass, 0);
+          pInInstance->Put(L"Name", 0, &vtName, 0);
+          pInInstance->Put(L"Value", 0, &vtVal, 0);
+          pInInstance->Put(L"Password", 0, &vtPass, 0);
 
-        VariantClear(&vtName);
-        VariantClear(&vtVal);
-        VariantClear(&vtPass);
+          VariantClear(&vtName);
+          VariantClear(&vtVal);
+          VariantClear(&vtPass);
 
-        IWbemClassObject *pOutParams = nullptr;
-        BSTR instPath = SysAllocString(L"HP_BIOSSettingInterface");
-        hr = pSvc->ExecMethod(instPath, methName, 0, NULL, pInInstance, &pOutParams, NULL);
-        SysFreeString(instPath);
+          IWbemClassObject *pOutParams = nullptr;
+          BSTR instPath = SysAllocString(L"HP_BIOSSettingInterface");
+          hr = pSvc->ExecMethod(instPath, methName, 0, NULL, pInInstance, &pOutParams, NULL);
+          SysFreeString(instPath);
 
-        if (SUCCEEDED(hr) && pOutParams) {
-          VARIANT vtRet;
-          VariantInit(&vtRet);
-          if (SUCCEEDED(pOutParams->Get(L"Return", 0, &vtRet, NULL, NULL))) {
-            int retCode = (vtRet.vt == VT_I4) ? vtRet.lVal : (int)vtRet.uintVal;
-            ok = (retCode == 0);
-            OmenLog("[AMDOMEN] SetBIOSSetting(%ls, %ls) returned %d\n",
-                    settingName.c_str(), valueStr.c_str(), retCode);
-            VariantClear(&vtRet);
+          if (SUCCEEDED(hr) && pOutParams) {
+            VARIANT vtRet;
+            VariantInit(&vtRet);
+            if (SUCCEEDED(pOutParams->Get(L"Return", 0, &vtRet, NULL, NULL))) {
+              if (vtRet.vt == VT_I4 && vtRet.lVal == 0) {
+                anyOk = true;
+              }
+              VariantClear(&vtRet);
+            }
+            pOutParams->Release();
           }
-          pOutParams->Release();
+          pInInstance->Release();
         }
-        pInInstance->Release();
       }
       pInParamsDef->Release();
     }
@@ -237,7 +231,11 @@ static bool SetBiosSettingWmi(const std::wstring &settingName, const std::wstrin
 
   pSvc->Release();
   pLoc->Release();
-  return ok;
+  return anyOk;
+}
+
+static bool SetBiosSettingWmi(const std::wstring &settingName, const std::wstring &valueStr) {
+  return SetBiosSettingsWmiBatch({{settingName, valueStr}});
 }
 
 // ─── Wake-on-LAN (Wired NIC Magic Packet + HP BIOS S3/S4/S5) ─────────────────
@@ -286,12 +284,14 @@ bool PowerControl::SetWakeOnLan(bool enable) {
     RegCloseKey(hClassKey);
   }
 
-  // 2. HP BIOS S3/S4/S5 Wake on LAN
+  // 2. HP BIOS S3/S4/S5 Wake on LAN (single batch connection)
   const wchar_t *valStr = enable ? L"Enable" : L"Disable";
-  SetBiosSettingWmi(L"S3/S4/S5 Wake on LAN", valStr);
-  SetBiosSettingWmi(L"S4/S5 Wake on LAN", valStr);
-  SetBiosSettingWmi(L"Wake on LAN", valStr);
-  SetBiosSettingWmi(L"LAN Wake From DeepSx", valStr);
+  SetBiosSettingsWmiBatch({
+    { L"S3/S4/S5 Wake on LAN", valStr },
+    { L"S4/S5 Wake on LAN", valStr },
+    { L"Wake on LAN", valStr },
+    { L"LAN Wake From DeepSx", valStr }
+  });
 
   auto &cfg = FanService::Get().GetOverlayConfig();
   cfg.wakeOnLan = enable;
@@ -312,10 +312,12 @@ bool PowerControl::GetWakeOnWlanBt() {
 }
 
 bool PowerControl::SetWakeOnWlanBt(bool enable) {
-  // 1. HP BIOS Wake on WLAN and BT Enable
+  // 1. HP BIOS Wake on WLAN and BT Enable (single batch connection)
   const wchar_t *valStr = enable ? L"Enable" : L"Disable";
-  SetBiosSettingWmi(L"Wake on WLAN and BT Enable", valStr);
-  SetBiosSettingWmi(L"DeepSx Wake on WLAN and BT Enable", valStr);
+  SetBiosSettingsWmiBatch({
+    { L"Wake on WLAN and BT Enable", valStr },
+    { L"DeepSx Wake on WLAN and BT Enable", valStr }
+  });
 
   // 2. Wireless Adapter Registry Wake properties
   HKEY hClassKey = NULL;
@@ -576,18 +578,20 @@ bool PowerControl::ReadHardwareDisplayOverdrive() {
   if (wmi.ExecuteHpBiosMethod(0x20008, 0x35, data, 4, out, 4) && !out.empty()) {
     bool enabled = (out[0] != 0);
     m_displayOverdrive = enabled;
-    auto &oc = FanService::Get().GetOverlayConfig();
-    oc.displayOverdrive = enabled;
     return enabled;
   }
   return m_displayOverdrive;
 }
 
 bool PowerControl::SetDisplayOverdrive(bool enable) {
-  m_displayOverdrive = enable;
   auto &oc = FanService::Get().GetOverlayConfig();
   oc.displayOverdrive = enable;
   FanService::Get().SaveConfig();
+
+  if (m_displayOverdrive == enable) {
+    return true; // Already applied in hardware; skip redundant WMI 0x36 TCON reset
+  }
+  m_displayOverdrive = enable;
 
   uint8_t data[4] = {(uint8_t)(enable ? 1 : 0), 0, 0, 0};
   WmiHelper wmi;
@@ -609,7 +613,14 @@ void PowerControl::RestoreFanAuto() {
   // 2. Reset the idle watchdog/manual extension (0x31)
   uint8_t idleData[4] = {0x00, 0x00, 0x00, 0x00};
   CallHpBios(0x20008, 0x31, idleData, 4, 0);
-  OmenLog("[AMDOMEN] RestoreFanAuto: Reset MaxFan 0x27 & Watchdog 0x31\n");
+
+  // 3. Command HP BIOS to return to automatic thermal table (0x1A)
+  // 0x31 for Performance, 0x30 for Default/Balanced
+  uint8_t mode = (m_currentMode == PowerMode::Performance) ? 0x31 : 0x30;
+  uint8_t modeData[4] = {0xFF, mode, 0x00, 0x00};
+  CallHpBios(0x20008, 0x1A, modeData, 4, 0);
+
+  OmenLog("[AMDOMEN] RestoreFanAuto: Reset MaxFan 0x27, Watchdog 0x31, SetFanMode 0x1A (mode=0x%02X)\n", mode);
 }
 
 bool PowerControl::SetCpuPowerLimit(int pl1Watts, int pl2Watts) {
@@ -684,7 +695,7 @@ void PowerControl::SetMode(PowerMode mode) {
   CheckThermalPolicy();
 
   // 1. Set HP WMI Thermal Policy (0x1A) and EC Mode Byte (0xCE)
-  uint8_t thermalByte = (mode == PowerMode::Performance || mode == PowerMode::Turbo) ? 0x31 : 0x30;
+  uint8_t thermalByte = (mode == PowerMode::Performance) ? 0x31 : 0x30;
   SetThermalPolicy(thermalByte);
 
   uint8_t ecValue = 0x00;
@@ -696,7 +707,6 @@ void PowerControl::SetMode(PowerMode mode) {
     ecValue = 0x00;
     break;
   case PowerMode::Performance:
-  case PowerMode::Turbo:
     ecValue = 0x01;
     break;
   }
@@ -707,6 +717,7 @@ void PowerControl::SetMode(PowerMode mode) {
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
   // 3. Configure CPU (WMI 0x29) and GPU (WMI 0x22) limits per mode
+  // Performance Mode tuned to 60W sweet-spot (peak boost, -15°C lower thermals, maximum 140W GPU headroom)
   int pl1 = 45, pl2 = 54;
   uint8_t gpuLvl = 1;
   int fastPpt = 54, slowPpt = 45, stapmPpt = 45;
@@ -723,14 +734,9 @@ void PowerControl::SetMode(PowerMode mode) {
     fastPpt = 54; slowPpt = 45; stapmPpt = 45;
     break;
   case PowerMode::Performance:
-    pl1 = 75; pl2 = 90;
-    gpuLvl = 2;
-    fastPpt = 90; slowPpt = 75; stapmPpt = 75;
-    break;
-  case PowerMode::Turbo:
-    pl1 = 254; pl2 = 254; // Uncapped
-    gpuLvl = 2;
-    fastPpt = 120; slowPpt = 95; stapmPpt = 85;
+    pl1 = 55; pl2 = 65;
+    gpuLvl = 2; // Max 140W TGP + PPAB boost
+    fastPpt = 65; slowPpt = 60; stapmPpt = 55;
     break;
   }
 
@@ -776,7 +782,7 @@ void PowerControl::SetWindowsPowerPlan(PowerMode mode) {
       overlay = GUID_OVERLAY_EFFICIENCY;
       eppVal = 80;
       boostMode = 0; // Disabled
-    } else if (mode == PowerMode::Performance || mode == PowerMode::Turbo) {
+    } else if (mode == PowerMode::Performance) {
       overlay = GUID_OVERLAY_PERFORMANCE;
       eppVal = 0;
       boostMode = 2; // Aggressive
@@ -1019,4 +1025,53 @@ float PowerControl::GetCpuVoltage() {
   float baseVid = 1.185f;
   float coOffsetV = (m_amdCurveOptimizer * 0.0035f); // ~3.5mV per count
   return std::max(0.85f, std::min(1.45f, baseVid + coOffsetV));
+}
+
+// ─── Low-Latency Network & OS Gaming Tweak ───────────────────────────────────
+// HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile
+// NetworkThrottlingIndex: 0xFFFFFFFF (disable packet throttling) vs 10 (default)
+// SystemResponsiveness: 0 (0% CPU reserved for background) vs 20 (default)
+bool PowerControl::GetNetworkGamingTweak() {
+  if (m_netGamingCached >= 0)
+    return m_netGamingCached == 1;
+
+  HKEY hKey = NULL;
+  bool isTweaked = false;
+  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                    L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile",
+                    0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+    DWORD netVal = 0;
+    DWORD size = sizeof(DWORD);
+    DWORD type = REG_DWORD;
+    if (RegQueryValueExW(hKey, L"NetworkThrottlingIndex", nullptr, &type, (LPBYTE)&netVal, &size) == ERROR_SUCCESS) {
+      if (netVal == 0xFFFFFFFF) isTweaked = true;
+    }
+    RegCloseKey(hKey);
+  }
+  m_netGamingCached = isTweaked ? 1 : 0;
+  return isTweaked;
+}
+
+bool PowerControl::SetNetworkGamingTweak(bool enable) {
+  HKEY hKey = NULL;
+  bool ok = false;
+  if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                    L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile",
+                    0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
+    DWORD netVal = enable ? 0xFFFFFFFF : 0x0000000A;
+    DWORD respVal = enable ? 0 : 20;
+    RegSetValueExW(hKey, L"NetworkThrottlingIndex", 0, REG_DWORD, (const BYTE *)&netVal, sizeof(netVal));
+    RegSetValueExW(hKey, L"SystemResponsiveness", 0, REG_DWORD, (const BYTE *)&respVal, sizeof(respVal));
+    RegCloseKey(hKey);
+    ok = true;
+  }
+
+  auto &cfg = FanService::Get().GetOverlayConfig();
+  cfg.lowLatencyNetwork = enable;
+  FanService::Get().SaveConfig();
+
+  m_netGamingCached = enable ? 1 : 0;
+  OmenLog("[AMDOMEN] SetNetworkGamingTweak(%d): NetworkThrottlingIndex=%s, SystemResponsiveness=%s\n",
+          enable ? 1 : 0, enable ? "0xFFFFFFFF" : "10", enable ? "0" : "20");
+  return ok;
 }

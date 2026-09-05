@@ -18,15 +18,15 @@ public:
   void Update(); // Called by HAL loop
 
   float GetFanSpeed(int index);
-  void SetFanAuto();
+  void SetFanAuto(bool persist = true);
 
   float GetFanPercentage(int index);
 
   FanControlMode GetControlMode() const { return m_controlMode; }
-  void SetControlMode(FanControlMode mode);
+  void SetControlMode(FanControlMode mode, bool persist = true);
 
   FanControlProfile GetProfile() const { return m_profile.load(); }
-  void SetProfile(FanControlProfile profile);
+  void SetProfile(FanControlProfile profile, bool persist = true);
 
   struct OverlayConfig {
     // HUD overlay settings
@@ -54,6 +54,8 @@ public:
     // Wake settings (Windows driver + HP BIOS S4/S5 & WLAN/BT)
     bool wakeOnLan = false;
     bool wakeOnWlanBt = false;
+    // Low-Latency Network & OS Gaming Tweak (NetworkThrottlingIndex = 0xFFFFFFFF)
+    bool lowLatencyNetwork = true;
     // Embedded API configuration
     bool apiEnabled = true;
     int apiPort = 8080;
@@ -83,8 +85,7 @@ private:
 
   int m_fan1Target = 0;
   int m_fan2Target = 0;
-  int m_heldPidTarget = -1; // deadband-held PID output (-1 = none yet)
-  bool m_emergencyLatch = false; // latched 100% until temp drops 10° below limit
+  bool m_emergencyLatch = false; // latched 100% until temp drops below safety threshold
   int m_persistenceCounter = 0;
 
   // Hysteresis
@@ -193,11 +194,13 @@ private:
 
       // Asymmetric Slew-Rate Limiting:
       // - Ramp-up is immediate to protect silicon from thermal heat-soak.
-      // - Ramp-down is rate-limited to 2.5%/sec so fans decay smoothly without hunting/pulsing.
+      // - Ramp-down is adaptive: decays quickly (5.0%/s) in the safe idle zone (<50°C),
+      //   smoothly (3.5%/s) in the mid zone, and gradually (2.5%/s) under heavy thermal load.
       if ((float)rawTarget > currentFan) {
         currentFan = (float)rawTarget;
       } else {
-        float maxDrop = 2.5f * dt;
+        float decayRate = (controlTemp < 50.0f) ? 5.0f : (controlTemp < 68.0f ? 3.5f : 2.5f);
+        float maxDrop = decayRate * dt;
         currentFan = (std::max)(currentFan - maxDrop, (float)rawTarget);
       }
 

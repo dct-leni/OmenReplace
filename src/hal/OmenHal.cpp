@@ -24,6 +24,50 @@ static bool ForegroundFullscreen() {
   HWND fg = GetForegroundWindow();
   if (!fg)
     return false;
+
+  // Exclude desktop wallpaper and taskbar windows
+  wchar_t className[64] = {};
+  GetClassNameW(fg, className, ARRAYSIZE(className));
+  if (wcscmp(className, L"Progman") == 0 ||
+      wcscmp(className, L"WorkerW") == 0 ||
+      wcscmp(className, L"Shell_TrayWnd") == 0 ||
+      wcscmp(className, L"Shell_SecondaryTrayWnd") == 0) {
+    return false;
+  }
+
+  DWORD pid = 0;
+  GetWindowThreadProcessId(fg, &pid);
+  if (pid == 0 || pid == GetCurrentProcessId())
+    return false;
+
+  // Exclude Windows shell / system processes
+  HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (hProc) {
+    wchar_t exePath[MAX_PATH] = {};
+    DWORD size = MAX_PATH;
+    if (QueryFullProcessImageNameW(hProc, 0, exePath, &size)) {
+      const wchar_t *exeName = wcsrchr(exePath, L'\\');
+      if (exeName) {
+        exeName++;
+        static const wchar_t *kNonGameExes[] = {
+            L"explorer.exe", L"dwm.exe", L"SearchHost.exe",
+            L"StartMenuExperienceHost.exe", L"ApplicationFrameHost.exe",
+            L"chrome.exe", L"msedge.exe", L"firefox.exe", L"brave.exe",
+            L"opera.exe", L"opera_gx.exe", L"vivaldi.exe", L"waterfox.exe",
+            L"zen.exe", L"vlc.exe", L"mpv.exe", L"discord.exe",
+            L"spotify.exe", L"code.exe", L"devenv.exe", L"windowsterminal.exe"
+        };
+        for (const wchar_t *nonGame : kNonGameExes) {
+          if (_wcsicmp(exeName, nonGame) == 0) {
+            CloseHandle(hProc);
+            return false;
+          }
+        }
+      }
+    }
+    CloseHandle(hProc);
+  }
+
   HMONITOR mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
   MONITORINFO mi = {sizeof(mi)};
   if (!GetMonitorInfoW(mon, &mi))
@@ -42,6 +86,9 @@ OmenHal::OmenHal() {}
 OmenHal::~OmenHal() { Shutdown(); }
 
 void OmenHal::Shutdown() {
+  static std::atomic<bool> s_shuttingDown{false};
+  if (s_shuttingDown.exchange(true))
+    return;
   if (!m_initialized)
     return;
 
@@ -53,7 +100,7 @@ void OmenHal::Shutdown() {
   if (m_workerThread.joinable())
     m_workerThread.join();
 
-  OmenLog("[AMDOMEN] Shutdown restoring fan control\n");
+  OmenLog("[AMDOMEN] Shutdown restoring fan control to BIOS hardware\n");
   FanController::Get().RestoreBios();
 
   OmenLog("[AMDOMEN] Shutdown complete\n");
@@ -211,7 +258,7 @@ void OmenHal::BackgroundLoop() {
     // PHASE 2: Compare with Config Targets
     auto &cfg = FanService::Get().GetOverlayConfig();
     PowerMode targetMode = static_cast<PowerMode>(cfg.powerMode);
-    if (targetMode == PowerMode::Turbo) {
+    if ((int)targetMode > 2) {
       targetMode = PowerMode::Performance;
     }
     int targetGpuPower = cfg.gpuPowerLevel;
@@ -272,6 +319,9 @@ void OmenHal::BackgroundLoop() {
     if (cfg.wakeOnWlanBt) {
       PowerControl::Get().SetWakeOnWlanBt(true);
     }
+    if (cfg.lowLatencyNetwork) {
+      PowerControl::Get().SetNetworkGamingTweak(true);
+    }
 
     if (FanService::Get().GetControlMode() == FanControlMode::AppMode) {
       m_fanControlActive = true;
@@ -281,13 +331,12 @@ void OmenHal::BackgroundLoop() {
       OmenLog("[AMDOMEN] Fan mode BIOS Auto\n");
     }
 
-    // PPT Readback Verification Loop
+    // PPT Readback Verification Loop (Eco 35/25/25, Balanced 54/45/45, Performance 65/60/55)
     int fast = 0, slow = 0, stapm = 0;
     switch (targetMode) {
-    case PowerMode::Eco:         fast = 35;  slow = 25; stapm = 25; break;
-    case PowerMode::Balanced:    fast = 54;  slow = 45; stapm = 45; break;
-    case PowerMode::Performance: fast = 90;  slow = 75; stapm = 75; break;
-    case PowerMode::Turbo:       fast = 120; slow = 95; stapm = 85; break;
+    case PowerMode::Eco:         fast = 35; slow = 25; stapm = 25; break;
+    case PowerMode::Balanced:    fast = 54; slow = 45; stapm = 45; break;
+    case PowerMode::Performance: fast = 65; slow = 60; stapm = 55; break;
     default: break;
     }
 
@@ -324,6 +373,10 @@ void OmenHal::BackgroundLoop() {
     static int gameHighSecs = 0, gameLowSecs = 0;
     static PowerMode gameSavedMode = PowerMode::Balanced;
     static int gameSavedProfile = 0;
+    static FanControlMode gameSavedControlMode = FanControlMode::Auto;
+    static DWORD gameSavedPid = 0;
+    static DWORD_PTR gameSavedAffinity = 0;
+    static DWORD gameSavedPriority = 0;
 
     if (FanService::Get().GetOverlayConfig().gameAutoProfile) {
       bool fullscreen = ForegroundFullscreen();
@@ -334,12 +387,39 @@ void OmenHal::BackgroundLoop() {
             gameActive = true;
             gameHighSecs = 0;
             gameSavedMode = PowerControl::Get().GetCurrentMode();
+            gameSavedControlMode = FanService::Get().GetControlMode();
             gameSavedProfile = (int)FanService::Get().GetProfile();
-            OmenLog("[AMDOMEN] game_mode enter (saved mode=%d profile=%d)\n",
-                    (int)gameSavedMode, gameSavedProfile);
+            OmenLog("[AMDOMEN] game_mode enter (saved mode=%d profile=%d fanMode=%d)\n",
+                    (int)gameSavedMode, gameSavedProfile, (int)gameSavedControlMode);
             PowerControl::Get().SetMode(PowerMode::Performance);
-            FanService::Get().SetControlMode(FanControlMode::AppMode);
-            FanService::Get().SetProfile(FanControlProfile::Cool);
+            FanService::Get().SetControlMode(FanControlMode::AppMode, false);
+            FanService::Get().SetProfile(FanControlProfile::Cool, false);
+
+            // Dual-CCD Core Affinity & OS Gaming Tuning
+            HWND fg = GetForegroundWindow();
+            if (fg) {
+              DWORD pid = 0;
+              GetWindowThreadProcessId(fg, &pid);
+              if (pid != 0 && pid != GetCurrentProcessId()) {
+                HANDLE hProc = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, FALSE, pid);
+                if (hProc) {
+                  DWORD_PTR origAff = 0, sysAff = 0;
+                  if (GetProcessAffinityMask(hProc, &origAff, &sysAff)) {
+                    gameSavedPid = pid;
+                    gameSavedAffinity = origAff;
+                    gameSavedPriority = GetPriorityClass(hProc);
+                    // Ryzen 9 8940HX: Pin to CCD0 (Cores 0..7 / Threads 0..15 -> mask 0x0000FFFF)
+                    DWORD_PTR ccd0Mask = 0x0000FFFF;
+                    SetProcessAffinityMask(hProc, ccd0Mask);
+                    SetPriorityClass(hProc, ABOVE_NORMAL_PRIORITY_CLASS);
+                    OmenLog("[AMDOMEN] game_affinity: PID %lu pinned to CCD0 (mask 0x%llx -> 0x%llx)\n",
+                            pid, (unsigned long long)origAff, (unsigned long long)ccd0Mask);
+                  }
+                  CloseHandle(hProc);
+                }
+              }
+            }
+            timeBeginPeriod(1); // 1.0ms high-resolution timer
           }
         } else {
           gameHighSecs = 0;
@@ -350,11 +430,29 @@ void OmenHal::BackgroundLoop() {
           if (++gameLowSecs >= 10) {
             gameActive = false;
             gameLowSecs = 0;
-            OmenLog("[AMDOMEN] game_mode exit -> restore mode=%d profile=%d\n",
-                    (int)gameSavedMode, gameSavedProfile);
+            OmenLog("[AMDOMEN] game_mode exit -> restore mode=%d profile=%d fanMode=%d\n",
+                    (int)gameSavedMode, gameSavedProfile, (int)gameSavedControlMode);
             PowerControl::Get().SetMode(gameSavedMode);
-            FanService::Get().SetControlMode(FanControlMode::AppMode);
-            FanService::Get().SetProfile((FanControlProfile)gameSavedProfile);
+            if (gameSavedControlMode == FanControlMode::Auto) {
+              FanService::Get().SetFanAuto(false);
+            } else {
+              FanService::Get().SetControlMode(FanControlMode::AppMode, false);
+              FanService::Get().SetProfile((FanControlProfile)gameSavedProfile, false);
+            }
+
+            if (gameSavedPid != 0 && gameSavedAffinity != 0) {
+              HANDLE hProc = OpenProcess(PROCESS_SET_INFORMATION, FALSE, gameSavedPid);
+              if (hProc) {
+                SetProcessAffinityMask(hProc, gameSavedAffinity);
+                SetPriorityClass(hProc, gameSavedPriority);
+                CloseHandle(hProc);
+                OmenLog("[AMDOMEN] game_affinity: PID %lu restored (mask 0x%llx)\n",
+                        gameSavedPid, (unsigned long long)gameSavedAffinity);
+              }
+              gameSavedPid = 0;
+              gameSavedAffinity = 0;
+            }
+            timeEndPeriod(1);
           }
         } else {
           gameLowSecs = 0;
@@ -364,8 +462,24 @@ void OmenHal::BackgroundLoop() {
     } else if (gameActive) {
       gameActive = false;
       PowerControl::Get().SetMode(gameSavedMode);
-      FanService::Get().SetControlMode(FanControlMode::AppMode);
-      FanService::Get().SetProfile((FanControlProfile)gameSavedProfile);
+      if (gameSavedControlMode == FanControlMode::Auto) {
+        FanService::Get().SetFanAuto(false);
+      } else {
+        FanService::Get().SetControlMode(FanControlMode::AppMode, false);
+        FanService::Get().SetProfile((FanControlProfile)gameSavedProfile, false);
+      }
+
+      if (gameSavedPid != 0 && gameSavedAffinity != 0) {
+        HANDLE hProc = OpenProcess(PROCESS_SET_INFORMATION, FALSE, gameSavedPid);
+        if (hProc) {
+          SetProcessAffinityMask(hProc, gameSavedAffinity);
+          SetPriorityClass(hProc, gameSavedPriority);
+          CloseHandle(hProc);
+        }
+        gameSavedPid = 0;
+        gameSavedAffinity = 0;
+      }
+      timeEndPeriod(1);
     }
 
     // ── HUD topmost reassert (fullscreen apps can demote it) ────────────
@@ -459,7 +573,7 @@ void OmenHal::SetPowerMode(int mode) {
     PowerControl::Get().SetGpuPowerOverride(0); // None
   } else if (mode == (int)PowerMode::Balanced) {
     PowerControl::Get().SetGpuPowerOverride(1); // TGP
-  } else if (mode == (int)PowerMode::Performance || mode == (int)PowerMode::Turbo) {
+  } else if (mode == (int)PowerMode::Performance) {
     PowerControl::Get().SetGpuPowerOverride(2); // +Boost
     FanService::Get().SetControlMode(FanControlMode::AppMode);
     FanService::Get().SetProfile(FanControlProfile::Cool);
@@ -491,3 +605,6 @@ bool OmenHal::GetWakeOnLan() { return PowerControl::Get().GetWakeOnLan(); }
 bool OmenHal::SetWakeOnLan(bool enable) { return PowerControl::Get().SetWakeOnLan(enable); }
 bool OmenHal::GetWakeOnWlanBt() { return PowerControl::Get().GetWakeOnWlanBt(); }
 bool OmenHal::SetWakeOnWlanBt(bool enable) { return PowerControl::Get().SetWakeOnWlanBt(enable); }
+
+bool OmenHal::GetNetworkGamingTweak() { return PowerControl::Get().GetNetworkGamingTweak(); }
+bool OmenHal::SetNetworkGamingTweak(bool enable) { return PowerControl::Get().SetNetworkGamingTweak(enable); }

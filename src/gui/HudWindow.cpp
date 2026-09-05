@@ -106,6 +106,7 @@ void HudWindow::RefreshFromHal() {
   float ramUsed = 0, ramTotal = 0, ramPct = 0;
   PowerControl::Get().GetSystemRamUsage(ramUsed, ramTotal, ramPct);
   m_ramLoad = ramPct;
+  m_ramTemp = OmenHal::Get().GetRamTemp();
 
   if (m_hwnd) InvalidateRect(m_hwnd, nullptr, FALSE);
 }
@@ -272,7 +273,7 @@ void HudWindow::OnPaint(HDC hdc) {
   GetClientRect(m_hwnd, &rc);
   int w = rc.right, h = rc.bottom;
 
-  // Scale factors relative to the default 180x135 layout.
+  // Scale factors relative to the default 3-row layout (180x135)
   float sx = (float)w / kWidth;
   float sy = (float)h / kHeight;
   float s = std::min(sx, sy);
@@ -297,10 +298,17 @@ void HudWindow::OnPaint(HDC hdc) {
 
   SetBkMode(mem, TRANSPARENT);
 
+  // Temperature coloring matching Main Window exactly:
   auto tempColor = [](float t) {
-    if (t > 85) return RGB(230, 50, 50);
-    if (t > 75) return RGB(230, 200, 50);
-    return RGB(50, 240, 180);
+    if (t > 85) return RGB(230, 50, 50);    // Red
+    if (t > 75) return RGB(230, 200, 50);   // Amber
+    return RGB(50, 240, 180);               // Green
+  };
+
+  auto ramColor = [](float t) {
+    if (t > 70) return RGB(230, 50, 50);    // Red
+    if (t > 55) return RGB(230, 200, 50);   // Amber
+    return RGB(50, 240, 180);               // Green
   };
 
   // Layout: label left, temp/pct right, thin glowing bars.
@@ -310,33 +318,20 @@ void HudWindow::OnPaint(HDC hdc) {
   int gapBetween = std::max(4, (int)(10 * s)); // between metric blocks
   int barH = std::max(2, (int)(4 * s));        // thin bar
 
-  // Vertical center the 3 metric blocks.
   int blockH = 3 * (textH + gapRow + barH) + 2 * gapBetween;
   int topY = std::max(pad, (h - blockH) / 2);
 
-  auto drawRow = [&](int y, int barY, const wchar_t *label, float val,
-                     float load, bool isPercent) {
+  auto drawMetricRow = [&](int y, int barY, const wchar_t *label,
+                           const wchar_t *valStr, COLORREF valColor, float load) {
     // Label left-aligned (dimmed — the values carry all attention).
     RECT lr = { pad, y, w / 2, y + textH };
     SetTextColor(mem, RGB(150, 150, 155));
     DrawTextW(mem, label, -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     // Value right-aligned.
-    wchar_t tbuf[16];
-    if (isPercent) {
-      swprintf_s(tbuf, L"%.0f%%", val);
-    } else {
-      swprintf_s(tbuf, L"%.0f\u00B0", val);
-    }
     RECT tr = { w / 2, y, w - pad, y + textH };
-    COLORREF valColor = isPercent
-                            ? (val > 85.0f
-                                   ? RGB(230, 50, 50)
-                                   : (val > 70.0f ? RGB(230, 200, 50)
-                                                  : RGB(50, 240, 180)))
-                            : tempColor(val);
     SetTextColor(mem, valColor);
-    DrawTextW(mem, tbuf, -1, &tr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(mem, valStr, -1, &tr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
     // Thin solid load bar; fill follows the same state color as the value.
     RECT track = { pad, barY, w - pad, barY + barH };
@@ -353,17 +348,36 @@ void HudWindow::OnPaint(HDC hdc) {
     }
   };
 
-  int y = topY;
-  int barY0 = y + textH + gapRow;
-  drawRow(y, barY0, L"CPU", m_cpuTemp, m_cpuLoad, false);
+  wchar_t tbuf[24];
 
+  // 1. CPU
+  int curY = topY;
+  int barY0 = curY + textH + gapRow;
+  swprintf_s(tbuf, L"%.0f\u00B0", m_cpuTemp);
+  drawMetricRow(curY, barY0, L"CPU", tbuf, tempColor(m_cpuTemp), m_cpuLoad);
+
+  // 2. GPU
   int y2 = barY0 + barH + gapBetween;
   int barY1 = y2 + textH + gapRow;
-  drawRow(y2, barY1, L"GPU", m_gpuTemp, m_gpuLoad, false);
+  if (m_gpuTemp > 0.0f) {
+    swprintf_s(tbuf, L"%.0f\u00B0", m_gpuTemp);
+    drawMetricRow(y2, barY1, L"GPU", tbuf, tempColor(m_gpuTemp), m_gpuLoad);
+  } else {
+    drawMetricRow(y2, barY1, L"GPU", L"Sleep", RGB(140, 140, 158), 0.0f);
+  }
 
+  // 3. RAM (temperature if available with ramColor matching main window; bar shows usage %)
   int y3 = barY1 + barH + gapBetween;
   int barY2 = y3 + textH + gapRow;
-  drawRow(y3, barY2, L"RAM", m_ramLoad, m_ramLoad, true);
+  if (m_ramTemp > 0.0f && m_ramTemp < 100.0f) {
+    swprintf_s(tbuf, L"%.0f\u00B0", m_ramTemp);
+    drawMetricRow(y3, barY2, L"RAM", tbuf, ramColor(m_ramTemp), m_ramLoad);
+  } else {
+    swprintf_s(tbuf, L"%.0f%%", m_ramLoad);
+    COLORREF ramValColor = (m_ramLoad > 85.0f ? RGB(230, 50, 50)
+                            : (m_ramLoad > 70.0f ? RGB(230, 200, 50) : RGB(50, 240, 180)));
+    drawMetricRow(y3, barY2, L"RAM", tbuf, ramValColor, m_ramLoad);
+  }
 
   SelectObject(mem, oldFont);
   DeleteObject(font);

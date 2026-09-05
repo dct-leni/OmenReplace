@@ -47,9 +47,6 @@ FanService::FanService() {
 void FanService::SaveConfig() {
   nlohmann::json j;
   int saveMode = (int)PowerControl::Get().GetCurrentMode();
-  if (saveMode == (int)PowerMode::Turbo) {
-    saveMode = (int)PowerMode::Performance; // Turbo is a temporary active session mode
-  }
   j["power_mode"] = saveMode;
   j["fan_mode"] = (int)m_controlMode.load();
   j["fan_profile"] = (int)m_profile.load();
@@ -63,6 +60,7 @@ void FanService::SaveConfig() {
   j["game_auto_profile"] = m_overlayConfig.gameAutoProfile;
   j["wake_on_lan"] = m_overlayConfig.wakeOnLan;
   j["wake_on_wlan_bt"] = m_overlayConfig.wakeOnWlanBt;
+  j["low_latency_network"] = m_overlayConfig.lowLatencyNetwork;
 
   nlohmann::json &hud = j["hud"];
   hud["show"] = m_overlayConfig.show;
@@ -115,7 +113,7 @@ void FanService::LoadConfig() {
       powerModeInt = j["power_mode"].get<int>();
       if (powerModeInt >= 0 && powerModeInt <= 2)
         m_overlayConfig.powerMode = powerModeInt;
-      else if (powerModeInt == (int)PowerMode::Turbo)
+      else
         m_overlayConfig.powerMode = (int)PowerMode::Performance;
     }
 
@@ -149,6 +147,8 @@ void FanService::LoadConfig() {
       m_overlayConfig.wakeOnLan = j["wake_on_lan"].get<bool>();
     if (j.contains("wake_on_wlan_bt"))
       m_overlayConfig.wakeOnWlanBt = j["wake_on_wlan_bt"].get<bool>();
+    if (j.contains("low_latency_network"))
+      m_overlayConfig.lowLatencyNetwork = j["low_latency_network"].get<bool>();
 
     PowerControl::Get().SetAcEnabled(m_overlayConfig.autoPowerSwitch);
 
@@ -353,12 +353,15 @@ void FanService::Update() {
       lastAssertTime = nowAssert;
     }
   } else {
-    // Auto Mode
-    m_persistenceCounter = 0;
-    m_lastTargetUpdate = 0;
+    // Auto Mode (BIOS)
+    if (m_lastAppliedFan1 != -1 || m_lastAppliedFan2 != -1) {
+      FanController::Get().RestoreBios();
       m_lastAppliedFan1 = -1;
       m_lastAppliedFan2 = -1;
-      m_fanControlHealthy = false;
+    }
+    m_persistenceCounter = 0;
+    m_lastTargetUpdate = 0;
+    m_fanControlHealthy = false;
   }
 }
 
@@ -367,28 +370,38 @@ float FanService::GetFanSpeed(int index) {
   return (index == 0) ? m_fan1Rpm : m_fan2Rpm;
 }
 
-void FanService::SetControlMode(FanControlMode mode) {
+void FanService::SetControlMode(FanControlMode mode, bool persist) {
   FanControlMode normalized = (mode == FanControlMode::AppMode)
                                   ? FanControlMode::AppMode
                                   : FanControlMode::Auto;
   m_controlMode = normalized;
-  LogFanEvent("[AMDOMEN] fan_mode requested=%d\n", (int)normalized);
-  SaveConfig();
+  LogFanEvent("[AMDOMEN] fan_mode requested=%d persist=%d\n", (int)normalized, persist ? 1 : 0);
+  if (normalized == FanControlMode::Auto) {
+    m_fanControlHealthy = false;
+    FanController::Get().RestoreBios();
+  }
+  if (persist) {
+    SaveConfig();
+  }
 }
 
-void FanService::SetFanAuto() {
+void FanService::SetFanAuto(bool persist) {
   m_controlMode = FanControlMode::Auto;
   m_fanControlHealthy = false;
-  LogFanEvent("[AMDOMEN] fan_mode forced=0\n");
+  LogFanEvent("[AMDOMEN] fan_mode forced=0 persist=%d\n", persist ? 1 : 0);
   FanController::Get().RestoreBios();
-  SaveConfig();
+  if (persist) {
+    SaveConfig();
+  }
 }
 
-void FanService::SetProfile(FanControlProfile profile) {
+void FanService::SetProfile(FanControlProfile profile, bool persist) {
   m_profile = profile;
   m_curveEngine.ApplyPreset(profile);
-  LogFanEvent("[AMDOMEN] fan_profile=%d\n", (int)profile);
-  SaveConfig();
+  LogFanEvent("[AMDOMEN] fan_profile=%d persist=%d\n", (int)profile, persist ? 1 : 0);
+  if (persist) {
+    SaveConfig();
+  }
 }
 
 float FanService::GetFanPercentage(int index) {

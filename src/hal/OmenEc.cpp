@@ -279,17 +279,29 @@ void OmenEc::SetFanMode(bool manual) {
 }
 
 void OmenEc::RestoreAutoControl() {
-  WriteByte(EC_XSS1, 0xFF);
-  WriteByte(EC_XSS2, 0xFF);
+  // Step 1: Disable fan boost (0xEC = 0x00)
+  WriteByte(EC_FFFF, 0x00); 
+
+  // Step 2: Release manual speed clamp (0xFF sentinel = unconfigured/hand control to BIOS)
+  WriteByte(EC_XSS1, 0xFF); 
+  WriteByte(EC_XSS2, 0xFF); 
   WriteByte(0x34, 0xFF); 
   WriteByte(0x35, 0xFF); 
 
-  WriteByte(EC_OMCC, 0x00); 
-  WriteByte(EC_XFCD, 0x00); 
-  WriteByte(EC_FFFF, 0x00); 
+  // Step 3: Enable fan hardware state (0xF4 = 0x00)
   WriteByte(EC_SFAN, 0x00); 
 
-  Sleep(100); 
+  // Step 4: Relinquish software control authority to BIOS (0x62 = 0x00)
+  WriteByte(EC_OMCC, 0x00); 
+
+  // Step 5: Zero countdown timer (0x63 = 0x00) so any active manual watchdog immediately expires
+  WriteByte(EC_XFCD, 0x00); 
+
+  Sleep(50); 
+
+  // Step 6: Re-assert fan state and BIOS control authority to ensure hardware latch
+  WriteByte(EC_SFAN, 0x00); 
+  WriteByte(EC_OMCC, 0x00); 
 }
 
 void OmenEc::FanHeartbeat() {

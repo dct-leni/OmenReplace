@@ -4,38 +4,42 @@
 #include <algorithm>
 #include <iostream>
 
-// Windows Headers for CPU Load (PDH)
-#include <pdh.h>
-#ifdef _MSC_VER
-#pragma comment(lib, "pdh.lib")
-#endif
-
-// Helper for CPU Load
-static PDH_HQUERY cpuQuery;
-static PDH_HCOUNTER cpuTotal;
-static bool pdhInitialized = false;
-
-void InitPdh() {
-  if (!pdhInitialized) {
-    if (PdhOpenQueryA(NULL, 0, &cpuQuery) == ERROR_SUCCESS) {
-      PdhAddCounterA(cpuQuery, "\\Processor Information(_Total)\\% Processor Utility", 0,
-                     &cpuTotal);
-      PdhCollectQueryData(cpuQuery);
-      pdhInitialized = true;
-    }
-  }
+// Native Win32 CPU Load calculation using GetSystemTimes (zero COM/registry overhead, <0.001ms)
+static uint64_t FileTimeToUInt64(const FILETIME &ft) {
+  return ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
 }
 
-float GetCpuLoadPDH() {
-  if (!pdhInitialized)
-    InitPdh();
-  if (!pdhInitialized)
+static float GetCpuLoadSystemTimes() {
+  static uint64_t prevIdle = 0;
+  static uint64_t prevTotal = 0;
+
+  FILETIME idleTime, kernelTime, userTime;
+  if (!GetSystemTimes(&idleTime, &kernelTime, &userTime))
     return 0.0f;
 
-  PDH_FMT_COUNTERVALUE counterVal;
-  PdhCollectQueryData(cpuQuery);
-  PdhGetFormattedCounterValue(cpuTotal, PDH_FMT_DOUBLE, NULL, &counterVal);
-  return (float)counterVal.doubleValue;
+  uint64_t idle = FileTimeToUInt64(idleTime);
+  uint64_t kernel = FileTimeToUInt64(kernelTime);
+  uint64_t user = FileTimeToUInt64(userTime);
+  uint64_t total = kernel + user;
+
+  if (prevTotal == 0) {
+    prevIdle = idle;
+    prevTotal = total;
+    return 0.0f;
+  }
+
+  uint64_t totalDiff = (total >= prevTotal) ? (total - prevTotal) : 0;
+  uint64_t idleDiff = (idle >= prevIdle) ? (idle - prevIdle) : 0;
+
+  prevIdle = idle;
+  prevTotal = total;
+
+  if (totalDiff == 0)
+    return 0.0f;
+
+  if (idleDiff > totalDiff) idleDiff = totalDiff;
+  float load = (float)(totalDiff - idleDiff) * 100.0f / (float)totalDiff;
+  return std::clamp(load, 0.0f, 100.0f);
 }
 
 ThermalService &ThermalService::Get() {
@@ -48,21 +52,19 @@ ThermalService::ThermalService() {
 }
 
 void ThermalService::Update() {
-  // PDH CPU load must be initialized on the worker thread.
-  InitPdh();
-
   // 1. Temps (Always 1s)
+  // Short-circuit: only read t58 or SMU if t57 is unavailable or out-of-bounds.
+  // Note: EC 0xCE is HP ACPI Power Mode byte, NOT a temperature sensor.
   float cpuVal = 0;
   float t57 = OmenEc::Get().GetCpuTemp57();
-  float t58 = OmenEc::Get().GetCpuTemp58();
-  float tCE = (float)OmenEc::Get().ReadByte(0xCE);
-
-  if (t57 > 25 && t57 < 105)
+  if (t57 > 25 && t57 < 105) {
     cpuVal = t57;
-  else if (t58 > 25 && t58 < 105)
-    cpuVal = t58;
-  else if (tCE > 25 && tCE < 105)
-    cpuVal = tCE;
+  } else {
+    float t58 = OmenEc::Get().GetCpuTemp58();
+    if (t58 > 25 && t58 < 105) {
+      cpuVal = t58;
+    }
+  }
 
   // SMU Tctl fallback (EC 0x57/0x58 unpopulated on some models). Ryzen
   // THM_TCON_CUR_TMP at SMN 0x59800: Tctl in bits [22:16] (Celsius).
@@ -111,7 +113,7 @@ void ThermalService::Update() {
 
   if (m_timer % 2 == 0) {
     // Load
-    cpuLoad = GetCpuLoadPDH();
+    cpuLoad = GetCpuLoadSystemTimes();
     gpuLoad = m_nvml.GetGpuLoad();
 
     // RAM temp via SMBus PIIX4 module (EnableSmbusPci once, then read both

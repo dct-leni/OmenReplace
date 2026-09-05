@@ -23,6 +23,7 @@ private:
   void ThreadMain();
   void HandleMenu(HWND hwnd);
   void SetupIcon(HWND hwnd);
+  void UpdateTooltip(HWND hwnd);
 
   std::atomic<bool> m_running{false};
   std::thread m_thread;

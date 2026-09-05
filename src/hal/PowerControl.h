@@ -4,7 +4,7 @@
 #include <string>
 #include <windows.h>
 
-enum class PowerMode { Eco = 0, Balanced = 1, Performance = 2, Turbo = 3 };
+enum class PowerMode { Eco = 0, Balanced = 1, Performance = 2 };
 
 class PowerControl {
 public:
@@ -72,7 +72,6 @@ public:
     case PowerMode::Eco: return 0;
     case PowerMode::Balanced: return 1;
     case PowerMode::Performance:
-    case PowerMode::Turbo:
     default: return 2;
     }
   }
@@ -88,6 +87,10 @@ public:
   // Wake-on-WLAN & Bluetooth (Wireless M.2 Magic Packet + HP BIOS Wake on WLAN/BT)
   bool GetWakeOnWlanBt();
   bool SetWakeOnWlanBt(bool enable);
+
+  // Low-Latency Network & OS Gaming Tweak (NetworkThrottlingIndex = 0xFFFFFFFF, SystemResponsiveness = 0)
+  bool GetNetworkGamingTweak();
+  bool SetNetworkGamingTweak(bool enable);
 
   // AC-line auto-switch: on battery → Eco+Quiet (saving current state),
   // on AC → restore. Call periodically from the worker loop.
@@ -133,6 +136,7 @@ private:
   // Wake cached state (refreshed at startup + after toggle)
   int m_wolCached = -1; // -1 unknown, 0 off, 1 on
   int m_wlanBtWolCached = -1; // -1 unknown, 0 off, 1 on
+  int m_netGamingCached = -1; // -1 unknown, 0 off, 1 on
 
   // WMI HP BIOS Helper
   bool CallHpBios(uint32_t cmd, uint32_t type, uint8_t *data, size_t size,
