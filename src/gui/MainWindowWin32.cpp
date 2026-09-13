@@ -292,10 +292,16 @@ void MainWindowWin32::RegisterClassOnce() {
   registered = true;
 }
 
+#ifndef AMDOMEN_VERSION_STR
+#define AMDOMEN_VERSION_STR "1.0.0"
+#endif
+#define AMDOMEN_WIDEN2(x) L ## x
+#define AMDOMEN_WIDEN(x) AMDOMEN_WIDEN2(x)
+
 void MainWindowWin32::Show() {
   if (!m_hwnd) {
     m_hwnd = CreateWindowExW(
-        0, L"AMDOMEN_MAIN_WIN32", L"AMDOMEN", WS_OVERLAPPEDWINDOW,
+        0, L"AMDOMEN_MAIN_WIN32", L"AMDOMEN v" AMDOMEN_WIDEN(AMDOMEN_VERSION_STR), WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, kWidth, kHeight, nullptr, nullptr,
         GetModuleHandleW(nullptr), this);
     if (!m_hwnd) return;

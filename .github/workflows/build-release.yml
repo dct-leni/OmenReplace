@@ -1,0 +1,123 @@
+name: Build & Release AMDOMEN
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Create a GitHub Release"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (Windows x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read Version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Get-Content VERSION).Trim()
+          Write-Output "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "Building AMDOMEN version $v"
+
+      - name: Setup MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Setup Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v4
+
+      - name: Configure CMake
+        run: |
+          cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build Executable
+        run: |
+          cmake --build build --config Release
+
+      - name: Verify Binary
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "output/AMDOMEN.exe")) {
+            throw "AMDOMEN.exe was not created in output directory"
+          }
+          $item = Get-Item "output/AMDOMEN.exe"
+          Write-Host "Build output: $($item.FullName) ($($item.Length) bytes)"
+          Write-Host "Version Info: $($item.VersionInfo.FileVersion)"
+
+      - name: Prepare Release Artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          $ver = "${{ steps.ver.outputs.version }}"
+          $zipName = "AMDOMEN-v${ver}-windows-x64.zip"
+          Compress-Archive -Path "output/AMDOMEN.exe", "README.md" -DestinationPath "dist/$zipName"
+          Write-Host "Created dist/$zipName"
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: amdomen-windows-x64
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event.inputs.create_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine Release Metadata
+        id: meta
+        shell: bash
+        run: |
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+            echo "title=AMDOMEN ${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event.inputs.create_release }}" == "true" ]]; then
+            echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
+            echo "title=AMDOMEN v${VERSION}" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          else
+            echo "tag=v${VERSION}-preview" >> $GITHUB_OUTPUT
+            echo "title=AMDOMEN v${VERSION} Preview (${GITHUB_SHA::7})" >> $GITHUB_OUTPUT
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: amdomen-windows-x64
+          path: release-artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.title }}
+          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          files: release-artifacts/*
+          generate_release_notes: true
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

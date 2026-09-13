@@ -39,6 +39,10 @@ inline bool &OmenLogEnabledFlag() {
 // Enable/disable logging (read from config by main()).
 inline void OmenLogSetEnabled(bool on) { OmenLogEnabledFlag() = on; }
 
+#ifndef AMDOMEN_VERSION_STR
+#define AMDOMEN_VERSION_STR "1.0.0"
+#endif
+
 inline void OmenLogStart() {
   if (!OmenLogEnabledFlag()) return;
   std::lock_guard<std::mutex> lock(OmenLogMutex());
@@ -48,7 +52,7 @@ inline void OmenLogStart() {
 
   SYSTEMTIME now;
   GetLocalTime(&now);
-  log << "\n=== OMEN Control start " << now.wYear << "-" << now.wMonth << "-"
+  log << "\n=== AMDOMEN v" << AMDOMEN_VERSION_STR << " start " << now.wYear << "-" << now.wMonth << "-"
       << now.wDay << " " << now.wHour << ":" << now.wMinute << ":"
       << now.wSecond << "." << now.wMilliseconds << " ===\n";
 }

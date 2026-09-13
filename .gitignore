@@ -2,7 +2,7 @@
 build/
 output/
 CMakeFiles/
-CMakeLists.txt
+CMakeCache.txt
 
 # Cache & Toolchain Cache Directories
 .cache/
