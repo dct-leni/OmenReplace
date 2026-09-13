@@ -93,7 +93,6 @@ public:
   bool GetSystemRamUsage(float &usedGb, float &totalGb, float &pct);
   float GetCpuVoltage();
 
-  bool SetFanLevelWmi(int cpuPercent, int gpuPercent); // WMI Method 0x2E
   bool SetFanLevelWmiBg(
       int cpuPercent,
       int gpuPercent); // Background thread version (uses persistent WMI)

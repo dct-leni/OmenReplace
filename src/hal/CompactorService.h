@@ -77,7 +77,6 @@ public:
   void SetSelectedAlgo(CompactAlgo algo) { m_algo = algo; }
 
   uint64_t GetTotalUncompressedBytes();
-  uint64_t GetTotalCompressedBytes();
   uint64_t GetTotalReclaimedBytes();
 
   static void CalculateDirectorySizesRecursive(const std::wstring &dir,

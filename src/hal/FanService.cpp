@@ -299,10 +299,12 @@ void FanService::Update() {
     }
 
     // Telemetry logging (compiled out unless OMEN_TELEMETRY defined)
+#ifdef OMEN_TELEMETRY
     TelemetryService::Get().Update(
         ThermalService::Get().GetCpuTemp(), ThermalService::Get().GetGpuTemp(),
         m_fan1Rpm, m_fan2Rpm, ThermalService::Get().GetCpuLoad(),
         ThermalService::Get().GetGpuLoad(), ThermalService::Get().GetTotalPower());
+#endif
 
     lastRpmRead = nowRpm;
   }

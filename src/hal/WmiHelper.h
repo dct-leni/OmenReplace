@@ -30,9 +30,6 @@ public:
                            std::vector<uint8_t> &outData,
                            size_t expectedOutSize = 0);
 
-  // Desktop detection
-  bool IsDesktopMode();
-
 private:
   bool m_initialized = false;
   IWbemLocator *m_pLoc = nullptr;

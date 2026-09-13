@@ -92,13 +92,7 @@ void PowerControl::Update() {
   else if (mode == 0x02 || mode == 0x50 || mode == 0x03)
     detectedEc = PowerMode::Eco;
 
-  // 2. Read Windows Power Plan (free active plan GUID to avoid leak)
-  GUID *activePlan = NULL;
-  if (PowerGetActiveScheme(NULL, &activePlan) == ERROR_SUCCESS) {
-    LocalFree(activePlan);
-  }
-
-  // 3. Update Windows Overlay Scheme
+  // 2. Update Windows Overlay Scheme
   PowerMode detectedOverlay = detectedEc; // Fallback to EC
   static auto pGetActualOverlay = []() -> PfnPowerGetActualOverlayScheme {
     HMODULE hPowr = GetModuleHandleA("powrprof.dll");
@@ -232,10 +226,6 @@ static bool SetBiosSettingsWmiBatch(const std::vector<std::pair<std::wstring, st
   pSvc->Release();
   pLoc->Release();
   return anyOk;
-}
-
-static bool SetBiosSettingWmi(const std::wstring &settingName, const std::wstring &valueStr) {
-  return SetBiosSettingsWmiBatch({{settingName, valueStr}});
 }
 
 // ─── Wake-on-LAN (Wired NIC Magic Packet + HP BIOS S3/S4/S5) ─────────────────
@@ -486,26 +476,6 @@ bool PowerControl::SetFanLevelWmiBg(int cpuPercent, int gpuPercent) {
   return CallHpBios(0x20008, 0x2E, data, 4, 0, &m_wmiBg);
 }
 
-bool PowerControl::SetFanLevelWmi(int cpuPercent, int gpuPercent) {
-  if (cpuPercent >= 95 || gpuPercent >= 95) {
-    if (!m_maxFanActive) {
-      SetFanMax(true);
-    }
-  } else {
-    if (m_maxFanActive) {
-      SetFanMax(false);
-    }
-  }
-
-  // CMD_FAN_SET_LEVEL = 0x2E
-  // Valid BIOS level range: 0 to 55 (55 = 5500 RPM nominal)
-  uint8_t cpuLevel = (uint8_t)(std::clamp(cpuPercent, 0, 100) * 55 / 100);
-  uint8_t gpuLevel = (uint8_t)(std::clamp(gpuPercent, 0, 100) * 55 / 100);
-  uint8_t data[4] = {cpuLevel, gpuLevel, 0, 0};
-
-  return CallHpBios(0x20008, 0x2E, data, 4, 0);
-}
-
 void PowerControl::RequestGpuMode(int mode) {
   // BiosCmd.GpuMode = 0x00002, CMD_GPU_SET_MODE = 0x52 (per OmenMon / omencore)
   uint8_t d[4] = {(uint8_t)mode, 0, 0, 0};
@@ -582,12 +552,18 @@ void PowerControl::RestoreFanAuto() {
   OmenLog("[AMDOMEN] RestoreFanAuto: Reset MaxFan 0x27, Watchdog 0x31, SetFanMode 0x1A (mode=0x%02X)\n", mode);
 }
 
+// ─── Hardware Safety Constants (Motherboard & VRM Protection) ─────────────
+static constexpr int kMaxSustainedCpuWatts = 55; // AMD 8940HX Base TDP
+static constexpr int kMaxBurstCpuWatts     = 75; // AMD 8940HX Max cTDP Burst (Motherboard Safe)
+static constexpr int kMinCpuWatts          = 15; // Minimum viable CPU power
+static constexpr int kMaxSafeTctlC         = 95; // 5°C safety buffer below 100°C TjMax
+
 bool PowerControl::SetCpuPowerLimit(int pl1Watts, int pl2Watts) {
   // WMI Method 0x29: { pl2, pl1, pl4, tpp }
   // Sentinel 0xFF means keep current / unchanged.
-  // Clamp to 254 max because 255 (0xFF) is the EC "keep unchanged" sentinel.
-  uint8_t pl1 = (uint8_t)std::max(10, std::min(254, pl1Watts));
-  uint8_t pl2 = (uint8_t)std::max(10, std::min(254, pl2Watts));
+  // Defensive clamp to hardware safety limits (55W sustained, 75W burst).
+  uint8_t pl1 = (uint8_t)std::max(kMinCpuWatts, std::min(kMaxSustainedCpuWatts, pl1Watts));
+  uint8_t pl2 = (uint8_t)std::max(kMinCpuWatts, std::min(kMaxBurstCpuWatts, pl2Watts));
   uint8_t data[4] = { pl2, pl1, 0xFF, 0xFF };
   return CallHpBios(0x20008, 0x29, data, 4, 0);
 }
@@ -603,40 +579,34 @@ bool PowerControl::SetAmdAllPptLimits(int fastW, int slowW, int stapmW) {
   OmenEc &ec = OmenEc::Get();
   if (!ec.IsInitialized()) return false;
 
+  // Hardware safety clamps (protects motherboard VRMs and power phases)
+  int f  = std::max(kMinCpuWatts, std::min(kMaxBurstCpuWatts, fastW));
+  int s  = std::max(kMinCpuWatts, std::min(kMaxSustainedCpuWatts, slowW));
+  int st = std::max(kMinCpuWatts, std::min(kMaxSustainedCpuWatts, stapmW));
+
   bool anyOk = false;
 
   // 1. Fast PPT (Burst limit in mW)
-  uint32_t argsFast[6] = { (uint32_t)(fastW * 1000), 0, 0, 0, 0, 0 };
+  uint32_t argsFast[6] = { (uint32_t)(f * 1000), 0, 0, 0, 0, 0 };
   if (ec.SendMp1Command(0x3E, argsFast)) anyOk = true;
   else {
-    uint32_t rFast[6] = { (uint32_t)(fastW * 1000), 0, 0, 0, 0, 0 };
+    uint32_t rFast[6] = { (uint32_t)(f * 1000), 0, 0, 0, 0, 0 };
     if (ec.SendSmuCommand(0x56, rFast)) anyOk = true;
   }
 
   // 2. Slow PPT (Sustained boost limit in mW)
-  uint32_t argsSlow[6] = { (uint32_t)(slowW * 1000), 0, 0, 0, 0, 0 };
+  uint32_t argsSlow[6] = { (uint32_t)(s * 1000), 0, 0, 0, 0, 0 };
   if (ec.SendMp1Command(0x5F, argsSlow)) anyOk = true;
   else {
-    uint32_t rSlow[6] = { (uint32_t)(slowW * 1000), 0, 0, 0, 0, 0 };
+    uint32_t rSlow[6] = { (uint32_t)(s * 1000), 0, 0, 0, 0, 0 };
     if (ec.SendSmuCommand(0xCB, rSlow)) anyOk = true;
   }
 
   // 3. STAPM (Sustained envelope limit in mW)
-  uint32_t argsStapm[6] = { (uint32_t)(stapmW * 1000), 0, 0, 0, 0, 0 };
+  uint32_t argsStapm[6] = { (uint32_t)(st * 1000), 0, 0, 0, 0, 0 };
   if (ec.SendMp1Command(0x4F, argsStapm)) anyOk = true;
 
   return anyOk;
-}
-
-static void SetEppPreference(DWORD eppVal) {
-  // EPP: 0=Max Performance, 50=Balanced, 80=Energy Efficient
-  GUID *activeScheme = nullptr;
-  if (PowerGetActiveScheme(NULL, &activeScheme) == ERROR_SUCCESS && activeScheme) {
-    PowerWriteACValueIndex(NULL, activeScheme, &GUID_PROCESSOR_SETTINGS_SUBGROUP, &GUID_PERFEPP, eppVal);
-    PowerWriteDCValueIndex(NULL, activeScheme, &GUID_PROCESSOR_SETTINGS_SUBGROUP, &GUID_PERFEPP, eppVal);
-    PowerSetActiveScheme(NULL, activeScheme);
-    LocalFree(activeScheme);
-  }
 }
 
 void PowerControl::SetMode(PowerMode mode) {
@@ -666,9 +636,9 @@ void PowerControl::SetMode(PowerMode mode) {
 
   // 3. Configure CPU (WMI 0x29) and GPU (WMI 0x22) limits per mode
   // Performance Mode tuned to 60W sweet-spot (peak boost, -15°C lower thermals, maximum 140W GPU headroom)
-  int pl1 = 45, pl2 = 54;
+  int pl1 = 45, pl2 = 55;
   uint8_t gpuLvl = 1;
-  int fastPpt = 54, slowPpt = 45, stapmPpt = 45;
+  int fastPpt = 55, slowPpt = 45, stapmPpt = 45;
 
   switch (mode) {
   case PowerMode::Eco:
@@ -677,14 +647,14 @@ void PowerControl::SetMode(PowerMode mode) {
     fastPpt = 35; slowPpt = 25; stapmPpt = 25;
     break;
   case PowerMode::Balanced:
-    pl1 = 45; pl2 = 54;
+    pl1 = 45; pl2 = 55; // Rounded to nearest 5W (was 54W)
     gpuLvl = 1;
-    fastPpt = 54; slowPpt = 45; stapmPpt = 45;
+    fastPpt = 55; slowPpt = 45; stapmPpt = 45;
     break;
   case PowerMode::Performance:
-    pl1 = 55; pl2 = 65;
-    gpuLvl = 2; // Max 140W TGP + PPAB boost
-    fastPpt = 65; slowPpt = 60; stapmPpt = 55;
+    pl1 = 55; pl2 = 75; // 55W AMD Base TDP sustained, 75W AMD max cTDP burst
+    gpuLvl = 2;         // 115W RTX 5070 Max TGP
+    fastPpt = 75; slowPpt = 55; stapmPpt = 55;
     break;
   }
 
@@ -699,6 +669,17 @@ void PowerControl::SetMode(PowerMode mode) {
 
   // 5. Windows Power Plan & CPU Boost
   SetWindowsPowerPlan(mode);
+
+  // 6. CPU Temp Limit (TjMax): auto-scale per PowerMode if set to Auto (0)
+  auto &cfg = FanService::Get().GetOverlayConfig();
+  if (cfg.tctlLimit == 0) {
+    int autoTctl = 90;
+    if (mode == PowerMode::Performance) autoTctl = 95;
+    else if (mode == PowerMode::Eco)    autoTctl = 85;
+    SetTctlTemp(autoTctl);
+  } else {
+    SetTctlTemp(cfg.tctlLimit);
+  }
 
   OmenLog("[AMDOMEN] SetMode(%d): WMI 0x1A=0x%02X, 0x29=(PL1=%dW, PL2=%dW), GPU=%d, SMU PPT=(%d/%d/%dW)\n",
           (int)mode, thermalByte, pl1, pl2, (int)gpuLvl, fastPpt, slowPpt, stapmPpt);
@@ -910,9 +891,7 @@ bool PowerControl::SetStapmLimit(int watts) {
   if (!ec.IsInitialized()) return false;
 
   // Zen4Settings: MP1 SMU_MSG_SetStapmLimit = 0x4F, args[0] = watts*1000.
-  int w = watts;
-  if (w < 15) w = 15;
-  if (w > 54) w = 54;
+  int w = std::max(kMinCpuWatts, std::min(kMaxSustainedCpuWatts, watts));
 
   uint32_t args[6] = {(uint32_t)(w * 1000), 0, 0, 0, 0, 0};
   return ec.SendMp1Command(0x4F, args);
@@ -937,9 +916,7 @@ bool PowerControl::SetTctlTemp(int tempC) {
   if (!ec.IsInitialized()) return false;
 
   // Zen4Settings: MP1 SMU_MSG_SetTctlMax = 0x3F, args[0] = temp in Celsius.
-  int t = tempC;
-  if (t < 75) t = 75;
-  if (t > 105) t = 105;
+  int t = std::max(75, std::min(kMaxSafeTctlC, tempC));
 
   uint32_t args[6] = {(uint32_t)t, 0, 0, 0, 0, 0};
   return ec.SendMp1Command(0x3F, args);

@@ -10,8 +10,6 @@
 #include <cstdio>
 #include <thread>
 
-void LogEc(const std::string &msg) {}
-
 static HANDLE s_ecMutex = NULL;
 static HANDLE s_pciMutex = NULL;
 

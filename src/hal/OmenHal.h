@@ -15,8 +15,6 @@ public:
   bool Initialize();
   bool IsInitialized() const { return m_initialized; }
   bool IsFanControlReady() const { return m_fanControlReady.load(); }
-  bool IsFanControlActive() const { return m_fanControlActive.load(); }
-  void SetFanControlActive(bool v) { m_fanControlActive = v; }
   void Shutdown();
 
   float GetCpuTemp();
@@ -65,10 +63,6 @@ public:
   void RequestGpuMode(int mode);
   void OptimizeMemory();
 
-  // Network & Gaming Latency Tweak
-  bool GetNetworkGamingTweak();
-  bool SetNetworkGamingTweak(bool enable);
-
 private:
   OmenHal();
   ~OmenHal();
@@ -81,7 +75,6 @@ private:
   std::atomic<bool> m_stopWorker{false};
   std::atomic<bool> m_initialized{false};
   std::atomic<bool> m_fanControlReady{false};
-  std::atomic<bool> m_fanControlActive{false};
 
 
   std::string m_cpuName;

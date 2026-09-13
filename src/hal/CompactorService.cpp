@@ -53,15 +53,6 @@ uint64_t CompactorService::GetTotalUncompressedBytes() {
   return total;
 }
 
-uint64_t CompactorService::GetTotalCompressedBytes() {
-  std::lock_guard<std::mutex> lock(m_mutex);
-  uint64_t total = 0;
-  for (const auto &g : m_games) {
-    total += (g.compressedBytes > 0 ? g.compressedBytes : g.uncompressedBytes);
-  }
-  return total;
-}
-
 uint64_t CompactorService::GetTotalReclaimedBytes() {
   std::lock_guard<std::mutex> lock(m_mutex);
   uint64_t saved = 0;

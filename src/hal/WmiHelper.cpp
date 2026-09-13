@@ -131,19 +131,6 @@ bool WmiHelper::ExecQuery(const std::wstring &query,
   return found;
 }
 
-bool WmiHelper::IsDesktopMode() {
-  std::variant<std::wstring, int, bool> val;
-  if (ExecQuery(L"SELECT PCSystemType FROM Win32_ComputerSystem",
-                L"PCSystemType", val)) {
-    if (std::holds_alternative<int>(val)) {
-      int type = std::get<int>(val);
-      if (type == 1)
-        return true; // Desktop
-    }
-  }
-  return false;
-}
-
 bool WmiHelper::ExecuteHpBiosMethod(uint32_t command, uint32_t commandType,
                                     uint8_t *data, size_t dataSize,
                                     std::vector<uint8_t> &outData,

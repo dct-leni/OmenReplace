@@ -12,7 +12,6 @@
 
 #include "../hal/ApiServer.h"
 #include "../hal/FanService.h"
-#include "../hal/MemoryService.h"
 #include "../hal/OmenHal.h"
 #include "../hal/OmenLog.h"
 #include "../hal/PowerControl.h"
@@ -589,6 +588,9 @@ LRESULT CALLBACK MainWindowWin32::WndProc(HWND hwnd, UINT msg, WPARAM wp,
 void MainWindowWin32::OnTimer() {
   if (m_flushFeedbackTicks > 0) {
     m_flushFeedbackTicks--;
+  }
+  if (!IsWindowVisible(m_hwnd) || IsIconic(m_hwnd)) {
+    return;
   }
   InvalidateRect(m_hwnd, nullptr, FALSE);
 }

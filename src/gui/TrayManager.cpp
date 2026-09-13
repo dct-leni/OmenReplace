@@ -18,7 +18,6 @@
 #define IDM_TRAY_PM_ECO 1009
 #define IDM_TRAY_PM_BALANCED 1010
 #define IDM_TRAY_PM_PERF 1011
-#define IDM_TRAY_PM_TURBO 1012
 
 static void SetFanAuto() { FanService::Get().SetFanAuto(); }
 

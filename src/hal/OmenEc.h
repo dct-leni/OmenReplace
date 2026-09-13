@@ -3,8 +3,7 @@
 #include <cstdint>
 #include "PawnIO.h"
 #include <vector>
-
-void LogEc(const std::string& msg);
+inline void LogEc(const char *) {}
 
 // Hardware Abstraction for Omen Embedded Controller
 // Implements fan speed reading and control

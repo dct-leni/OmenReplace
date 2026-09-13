@@ -20,9 +20,14 @@ OmenHal &OmenHal::Get() {
 
 std::atomic<bool> g_gameTimerActive{false};
 
-// Foreground window covers its whole monitor without a caption style —
-// borderless/exclusive fullscreen (games, slideshow apps).
-static bool ForegroundFullscreen() {
+// Foreground window covers its monitor or matches known game paths.
+// Supports:
+// 1. Direct path match against custom_game_folders and Steam library (immediate, 0% GPU req).
+// 2. Borderless windowed and exclusive fullscreen (margin-tolerant to handle DPI & 7px borders).
+// 3. Browser protection (NVDEC video decode vs 3D GPU load).
+static bool ForegroundFullscreen(bool *outIsKnownGame = nullptr) {
+  if (outIsKnownGame)
+    *outIsKnownGame = false;
   HWND fg = GetForegroundWindow();
   if (!fg)
     return false;
@@ -42,7 +47,10 @@ static bool ForegroundFullscreen() {
   if (pid == 0 || pid == GetCurrentProcessId())
     return false;
 
-  // Exclude Windows shell / system processes
+  bool isKnownGame = false;
+  bool isBrowser = false;
+
+  // Inspect process image path
   HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
   if (hProc) {
     wchar_t exePath[MAX_PATH] = {};
@@ -51,25 +59,65 @@ static bool ForegroundFullscreen() {
       const wchar_t *exeName = wcsrchr(exePath, L'\\');
       if (exeName) {
         exeName++;
-        static const wchar_t *kNonGameExes[] = {
+        // Exclude Windows shell / system background processes
+        static const wchar_t *kShellExes[] = {
             L"explorer.exe", L"dwm.exe", L"SearchHost.exe",
             L"StartMenuExperienceHost.exe", L"ApplicationFrameHost.exe",
-            L"chrome.exe", L"msedge.exe", L"firefox.exe", L"brave.exe",
-            L"opera.exe", L"opera_gx.exe", L"vivaldi.exe", L"waterfox.exe",
-            L"zen.exe", L"vlc.exe", L"mpv.exe", L"discord.exe",
-            L"spotify.exe", L"code.exe", L"devenv.exe", L"windowsterminal.exe"
+            L"ShellExperienceHost.exe", L"LockApp.exe"
         };
-        for (const wchar_t *nonGame : kNonGameExes) {
-          if (_wcsicmp(exeName, nonGame) == 0) {
+        for (const wchar_t *shellExe : kShellExes) {
+          if (_wcsicmp(exeName, shellExe) == 0) {
             CloseHandle(hProc);
             return false;
           }
         }
+
+        // Identify common browsers for video protection
+        static const wchar_t *kBrowserExes[] = {
+            L"chrome.exe", L"msedge.exe", L"firefox.exe", L"brave.exe",
+            L"opera.exe", L"opera_gx.exe", L"vivaldi.exe", L"waterfox.exe", L"zen.exe"
+        };
+        for (const wchar_t *bExe : kBrowserExes) {
+          if (_wcsicmp(exeName, bExe) == 0) {
+            isBrowser = true;
+            break;
+          }
+        }
+      }
+
+      // Check against user-configured custom game folders and standard Steam path
+      const auto &customFolders = FanService::Get().GetOverlayConfig().customGameFolders;
+      for (const auto &cf : customFolders) {
+        if (!cf.empty() && _wcsnicmp(exePath, cf.c_str(), cf.length()) == 0) {
+          isKnownGame = true;
+          break;
+        }
+      }
+      if (!isKnownGame && wcsstr(exePath, L"\\steamapps\\common\\") != nullptr) {
+        isKnownGame = true;
       }
     }
     CloseHandle(hProc);
   }
 
+  if (outIsKnownGame) {
+    *outIsKnownGame = isKnownGame;
+  }
+
+  // Known library game: positively identified, always qualifies immediately
+  if (isKnownGame) {
+    return true;
+  }
+
+  // Web browsers: video playback (YouTube/Netflix) uses NVDEC with near-zero 3D load.
+  // Only treat browser as game if 3D GPU load is substantial (> 20%, e.g. WebGL 3D game).
+  if (isBrowser) {
+    if (ThermalService::Get().GetGpuLoad() < 20.0f) {
+      return false;
+    }
+  }
+
+  // Generic fullscreen check with margin tolerance (handles DPI scaling and -7px DWM frame margins)
   HMONITOR mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
   MONITORINFO mi = {sizeof(mi)};
   if (!GetMonitorInfoW(mon, &mi))
@@ -77,10 +125,13 @@ static bool ForegroundFullscreen() {
   RECT wr;
   if (!GetWindowRect(fg, &wr))
     return false;
-  if (wr.left != mi.rcMonitor.left || wr.top != mi.rcMonitor.top ||
-      wr.right != mi.rcMonitor.right || wr.bottom != mi.rcMonitor.bottom)
-    return false;
-  return (GetWindowLongPtrW(fg, GWL_STYLE) & WS_CAPTION) == 0;
+
+  bool coversMonitor = (wr.left <= mi.rcMonitor.left + 8) &&
+                       (wr.top <= mi.rcMonitor.top + 8) &&
+                       (wr.right >= mi.rcMonitor.right - 8) &&
+                       (wr.bottom >= mi.rcMonitor.bottom - 8);
+
+  return coversMonitor;
 }
 
 OmenHal::OmenHal() {}
@@ -95,7 +146,6 @@ void OmenHal::Shutdown() {
     return;
 
   OmenLog("[AMDOMEN] Shutdown begin\n");
-  m_fanControlActive = false;
   m_stopWorker = true;
   m_workerWake.notify_all();
 
@@ -167,7 +217,6 @@ bool OmenHal::Initialize() {
 
   m_stopWorker = false;
   m_fanControlReady = false;
-  m_fanControlActive = false;
   m_initialized = true;
   m_workerThread = std::thread(&OmenHal::BackgroundLoop, this);
   OmenLog("[AMDOMEN] HAL worker started\n");
@@ -303,19 +352,18 @@ void OmenHal::BackgroundLoop() {
     }
 
     if (FanService::Get().GetControlMode() == FanControlMode::AppMode) {
-      m_fanControlActive = true;
       FanService::Get().SetProfile(FanService::Get().GetProfile());
       OmenLog("[AMDOMEN] Fan mode active with profile=%d\n", (int)FanService::Get().GetProfile());
     } else {
       OmenLog("[AMDOMEN] Fan mode BIOS Auto\n");
     }
 
-    // PPT Readback Verification Loop (Eco 35/25/25, Balanced 54/45/45, Performance 65/60/55)
+    // PPT Readback Verification Loop (Eco 35/25/25, Balanced 55/45/45, Performance 75/55/55)
     int fast = 0, slow = 0, stapm = 0;
     switch (targetMode) {
     case PowerMode::Eco:         fast = 35; slow = 25; stapm = 25; break;
-    case PowerMode::Balanced:    fast = 54; slow = 45; stapm = 45; break;
-    case PowerMode::Performance: fast = 65; slow = 60; stapm = 55; break;
+    case PowerMode::Balanced:    fast = 55; slow = 45; stapm = 45; break;
+    case PowerMode::Performance: fast = 75; slow = 55; stapm = 55; break;
     default: break;
     }
 
@@ -346,8 +394,8 @@ void OmenHal::BackgroundLoop() {
     PowerControl::Get().CheckAcLine();
 
     // ── Game auto-profile ────────────────────────────────────────────────
-    // Game = fullscreen foreground + GPU load > 40% sustained 5s.
-    // Exit = condition false 10s → restore mode/profile captured at entry.
+    // Game = positive game directory match OR (fullscreen + GPU load > 15% sustained 2s).
+    // Exit = process closed or focused away for >= 15s (no drop-out during pauses/menus).
     static bool gameActive = false;
     static int gameHighSecs = 0, gameLowSecs = 0;
     static PowerMode gameSavedMode = PowerMode::Balanced;
@@ -357,45 +405,62 @@ void OmenHal::BackgroundLoop() {
     static DWORD_PTR gameSavedAffinity = 0;
     static DWORD gameSavedPriority = 0;
 
-    if (FanService::Get().GetOverlayConfig().gameAutoProfile) {
-      bool fullscreen = ForegroundFullscreen();
+    bool hudShow = FanService::Get().GetOverlayConfig().show;
+    bool gameProfileEnabled = FanService::Get().GetOverlayConfig().gameAutoProfile;
+    bool hasQueriedFullscreen = false;
+    bool isKnownGame = false;
+    bool fullscreen = false;
+    auto checkFullscreen = [&]() {
+      if (!hasQueriedFullscreen) {
+        fullscreen = ForegroundFullscreen(&isKnownGame);
+        hasQueriedFullscreen = true;
+      }
+      return fullscreen;
+    };
+
+    if (gameProfileEnabled) {
+      checkFullscreen();
       float gpuLoad = ThermalService::Get().GetGpuLoad();
+
+      HWND fg = GetForegroundWindow();
+      DWORD fgPid = 0;
+      if (fg)
+        GetWindowThreadProcessId(fg, &fgPid);
+
       if (!gameActive) {
-        if (fullscreen && gpuLoad > 40.0f) {
-          if (++gameHighSecs >= 5) {
+        // Game activation: known library game qualifies immediately (0% GPU req);
+        // generic fullscreen window requires realistic 15% GPU load sustained 2s.
+        bool shouldActivate = fullscreen && (isKnownGame || gpuLoad > 15.0f);
+        if (shouldActivate) {
+          if (++gameHighSecs >= 2) {
             gameActive = true;
             gameHighSecs = 0;
             gameSavedMode = PowerControl::Get().GetCurrentMode();
             gameSavedControlMode = FanService::Get().GetControlMode();
             gameSavedProfile = (int)FanService::Get().GetProfile();
-            OmenLog("[AMDOMEN] game_mode enter (saved mode=%d profile=%d fanMode=%d)\n",
-                    (int)gameSavedMode, gameSavedProfile, (int)gameSavedControlMode);
+            OmenLog("[AMDOMEN] game_mode enter (knownGame=%d saved mode=%d profile=%d fanMode=%d)\n",
+                    isKnownGame ? 1 : 0, (int)gameSavedMode, gameSavedProfile, (int)gameSavedControlMode);
             PowerControl::Get().SetMode(PowerMode::Performance);
             FanService::Get().SetControlMode(FanControlMode::AppMode, false);
             FanService::Get().SetProfile(FanControlProfile::Cool, false);
 
             // Dual-CCD Core Affinity & OS Gaming Tuning
-            HWND fg = GetForegroundWindow();
-            if (fg) {
-              DWORD pid = 0;
-              GetWindowThreadProcessId(fg, &pid);
-              if (pid != 0 && pid != GetCurrentProcessId()) {
-                HANDLE hProc = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, FALSE, pid);
-                if (hProc) {
-                  DWORD_PTR origAff = 0, sysAff = 0;
-                  if (GetProcessAffinityMask(hProc, &origAff, &sysAff)) {
-                    gameSavedPid = pid;
-                    gameSavedAffinity = origAff;
-                    gameSavedPriority = GetPriorityClass(hProc);
-                    // Ryzen 9 8940HX: Pin to CCD0 (Cores 0..7 / Threads 0..15 -> mask 0x0000FFFF)
-                    DWORD_PTR ccd0Mask = 0x0000FFFF;
-                    SetProcessAffinityMask(hProc, ccd0Mask);
-                    SetPriorityClass(hProc, ABOVE_NORMAL_PRIORITY_CLASS);
-                    OmenLog("[AMDOMEN] game_affinity: PID %lu pinned to CCD0 (mask 0x%llx -> 0x%llx)\n",
-                            pid, (unsigned long long)origAff, (unsigned long long)ccd0Mask);
-                  }
-                  CloseHandle(hProc);
+            if (fg && fgPid != 0 && fgPid != GetCurrentProcessId()) {
+              HANDLE hProc = OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, FALSE, fgPid);
+              if (hProc) {
+                DWORD_PTR origAff = 0, sysAff = 0;
+                if (GetProcessAffinityMask(hProc, &origAff, &sysAff)) {
+                  gameSavedPid = fgPid;
+                  gameSavedAffinity = origAff;
+                  gameSavedPriority = GetPriorityClass(hProc);
+                  // Ryzen 9 8940HX: Pin to CCD0 (Cores 0..7 / Threads 0..15 -> mask 0x0000FFFF)
+                  DWORD_PTR ccd0Mask = 0x0000FFFF;
+                  SetProcessAffinityMask(hProc, ccd0Mask);
+                  SetPriorityClass(hProc, ABOVE_NORMAL_PRIORITY_CLASS);
+                  OmenLog("[AMDOMEN] game_affinity: PID %lu pinned to CCD0 (mask 0x%llx -> 0x%llx)\n",
+                          fgPid, (unsigned long long)origAff, (unsigned long long)ccd0Mask);
                 }
+                CloseHandle(hProc);
               }
             }
             if (!g_gameTimerActive.exchange(true)) {
@@ -408,8 +473,11 @@ void OmenHal::BackgroundLoop() {
         }
         gameLowSecs = 0;
       } else {
-        if (!fullscreen || gpuLoad < 40.0f) {
-          if (++gameLowSecs >= 10) {
+        // Deactivation hysteresis: Maintain Game Mode while game process is active in foreground.
+        // Only exit if the user switches away from the game for >= 15s, or process closes.
+        bool stillInGame = (gameSavedPid != 0 && fgPid == gameSavedPid) || fullscreen;
+        if (!stillInGame) {
+          if (++gameLowSecs >= 15) {
             gameActive = false;
             gameLowSecs = 0;
             OmenLog("[AMDOMEN] game_mode exit -> restore mode=%d profile=%d fanMode=%d\n",
@@ -472,7 +540,7 @@ void OmenHal::BackgroundLoop() {
 
     // ── HUD topmost reassert (fullscreen apps can demote it) ────────────
     static auto lastHudAssert = std::chrono::steady_clock::now() - std::chrono::seconds(10);
-    if (FanService::Get().GetOverlayConfig().show && ForegroundFullscreen()) {
+    if (hudShow && checkFullscreen()) {
       auto now = std::chrono::steady_clock::now();
       if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastHudAssert).count() > 2000) {
         lastHudAssert = now;
@@ -509,7 +577,6 @@ void OmenHal::BackgroundLoop() {
   }
 
   m_fanControlReady = false;
-  m_fanControlActive = false;
   if (SUCCEEDED(comResult))
     CoUninitialize();
 }

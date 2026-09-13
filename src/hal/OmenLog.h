@@ -15,17 +15,20 @@ inline std::mutex &OmenLogMutex() {
   return mutex;
 }
 
-inline std::string OmenLogPath() {
-  char path[MAX_PATH] = {};
-  DWORD length = GetModuleFileNameA(nullptr, path, MAX_PATH);
-  if (length == 0 || length >= MAX_PATH)
-    return "amdomen.log";
+inline const std::string &OmenLogPath() {
+  static const std::string s_logPath = []() {
+    char path[MAX_PATH] = {};
+    DWORD length = GetModuleFileNameA(nullptr, path, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH)
+      return std::string("amdomen.log");
 
-  std::string result(path, length);
-  size_t separator = result.find_last_of("\\/");
-  if (separator == std::string::npos)
-    return "amdomen.log";
-  return result.substr(0, separator + 1) + "amdomen.log";
+    std::string result(path, length);
+    size_t separator = result.find_last_of("\\/");
+    if (separator == std::string::npos)
+      return std::string("amdomen.log");
+    return result.substr(0, separator + 1) + "amdomen.log";
+  }();
+  return s_logPath;
 }
 
 inline bool &OmenLogEnabledFlag() {
