@@ -1,6 +1,9 @@
-# OmenReplace (AMDOMEN Control)
+# AMDomen (AMDOMEN Control)
+<img width="1030" height="659" alt="image" src="https://github.com/user-attachments/assets/502ddf81-dee0-42e6-a9a2-a20063d65add" />
 
-**OmenReplace** is an ultra-lightweight, bloat-free, native C++ replacement for the HP OMEN Gaming Hub (OGH). It provides full hardware management—progressive fan curves, power limits, AMD Curve Optimizer undervolting, battery protection, hardware HUD overlay with non-invasive FPS tracking, Dual-CCD core affinity game profile, low-latency network tweaks, and an embedded web dashboard—with **zero background telemetry**, instant startup, and a minimal memory footprint (<15 MB RAM vs 500+ MB for OGH).
+
+
+**AMDomen** is an ultra-lightweight, bloat-free, native C++ replacement for the HP OMEN Gaming Hub (OGH). It provides full hardware management—progressive fan curves, power limits, AMD Curve Optimizer undervolting, battery protection, hardware HUD overlay with non-invasive FPS tracking, Dual-CCD core affinity game profile, low-latency network tweaks, and an embedded web dashboard—with **zero background telemetry**, instant startup, and a minimal memory footprint (<15 MB RAM vs 500+ MB for OGH).
 
 ---
 
@@ -318,7 +321,7 @@ Measures game frame rate without injecting DLLs into game processes:
 ## Source Code Directory Structure
 
 ```
-OmenReplace/
+AMDomen/
 ├── build.bat                    # Automated MSVC + Ninja build script
 ├── CMakeLists.txt               # CMake build definition (GLOB-based C++20)
 ├── output/
